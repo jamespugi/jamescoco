@@ -1,0 +1,2657 @@
+<script setup>
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import ConfirmationModal from '../../components/ConfirmationModal.vue';
+import {
+  cancelMyOrder,
+  createTraderProduct,
+  fetchCartItems,
+  fetchMarketplaceTraders,
+  fetchMyOrders,
+  fetchTraderProducts,
+  markMyOrderReceived,
+  placeMyOrder,
+  removeCartItem,
+  removeTraderProduct,
+  updateTraderProduct,
+  updateCartItemQuantity as updateCartItemQuantityApi,
+} from '../../services/api';
+import { toMediaUrl } from '../../services/media';
+import { getCheckoutAddress } from '../../services/checkoutAddress';
+import { getUser } from '../../services/session';
+
+const router = useRouter();
+const route = useRoute();
+const MARKETPLACE_HUB_TABS = ['inventory', 'marketplace', 'cart', 'orders'];
+const MANAGE_PRODUCTS_TABS = ['add-product', 'inventory'];
+const activeTab = ref('marketplace');
+
+const form = reactive({
+  productName: '',
+  size: 'small',
+  lengthCm: '',
+  productPrice: 0,
+  stockQuantity: 0,
+  productImage: null,
+});
+
+const products = ref([]);
+const loadingProducts = ref(false);
+const saving = ref(false);
+const feedback = ref('');
+const marketplace = ref([]);
+const cartItems = ref([]);
+const orders = ref([]);
+const loadingMarketplace = ref(false);
+const loadingCart = ref(false);
+const loadingOrders = ref(false);
+const selectedCartItemIds = ref([]);
+const currentAddress = ref(null);
+const quantityUpdatingIds = ref([]);
+const showCheckoutConfirmModal = ref(false);
+const showProductEditModal = ref(false);
+const showCancelOrderModal = ref(false);
+const showReceiveRatingModal = ref(false);
+const showDeleteProductConfirmModal = ref(false);
+const checkoutPaymentMethod = ref('cash_on_delivery');
+const paymentReceiptFile = ref(null);
+const editingProduct = ref(null);
+const pendingDeleteProduct = ref(null);
+const cancellingOrderId = ref(null);
+const receivingOrderId = ref(null);
+const cancellationReason = ref('');
+const receiveRating = ref(0);
+const receiveReview = ref('');
+const orderActionLoadingIds = ref([]);
+const productSaving = ref(false);
+const deletingProductId = ref(null);
+const MY_ORDERS_UPDATED_EVENT = 'cocolytics-my-orders-updated';
+const FAST_MARKETPLACE_POLL_MS = 2500;
+const editProductForm = reactive({
+  productName: '',
+  size: 'small',
+  lengthCm: '',
+  productPrice: 0,
+  stockQuantity: 0,
+  productImage: null,
+});
+
+const orderCount = computed(() => orders.value.length);
+const inventoryCount = computed(() => products.value.length);
+const isManageProductsRoute = computed(() => String(route.name || '') === 'trader-manage-products');
+const pageTitle = computed(() => (isManageProductsRoute.value ? 'Manage Products' : 'Marketplace Hub'));
+const pageSubtitle = computed(() => (
+  isManageProductsRoute.value
+    ? 'Add new products and manage your inventory in one place.'
+    : 'Manage inventory, browse traders, shop, and track orders.'
+));
+const orderSearch = ref('');
+const orderStatusFilter = ref('all');
+
+const orderStatusFilters = [
+  { key: 'all', label: 'All' },
+  { key: 'pending', label: 'Pending' },
+  { key: 'to_ship', label: 'To Ship' },
+  { key: 'to_receive', label: 'To Receive' },
+  { key: 'completed', label: 'Completed' },
+  { key: 'cancelled', label: 'Cancelled' },
+];
+const currentUserId = computed(() => Number(getUser()?.id || 0));
+let marketplaceRealtimeTimer = null;
+
+function orderMatchesSearch(order, searchText) {
+  if (!searchText) return true;
+
+  const orderId = String(order?.id || '');
+  const status = String(order?.status || '');
+  const fullName = String(order?.customerFullName || '');
+  const contact = String(order?.customerContactNumber || '');
+  const address = String(order?.deliveryFullAddress || '');
+  const deliveryNotes = String(order?.deliveryNotes || '');
+  const itemSummary = (order?.items || [])
+    .map((item) => `${item?.productName || ''} ${item?.traderName || ''}`)
+    .join(' ');
+
+  const combined = `${orderId} ${status} ${fullName} ${contact} ${address} ${deliveryNotes} ${itemSummary}`
+    .toLowerCase();
+
+  return combined.includes(searchText);
+}
+
+const filteredOrders = computed(() => {
+  const activeStatus = String(orderStatusFilter.value || 'all').toLowerCase();
+  const searchText = String(orderSearch.value || '').trim().toLowerCase();
+
+  return orders.value.filter((order) => {
+    const statusMatch = activeStatus === 'all' || normalizeOrderStatus(order.status) === activeStatus;
+    if (!statusMatch) return false;
+    return orderMatchesSearch(order, searchText);
+  });
+});
+
+const filteredOrderCount = computed(() => filteredOrders.value.length);
+const deleteProductConfirmMessage = computed(() => {
+  const name = String(pendingDeleteProduct.value?.productName || 'this product').trim();
+  return `Delete "${name}"? This action cannot be undone.`;
+});
+
+function isCurrentTraderId(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 && parsed === currentUserId.value;
+}
+
+function sanitizeTraderRows(rows) {
+  return (rows || [])
+    .filter((trader) => !isCurrentTraderId(trader?.traderId))
+    .map((trader) => {
+      const products = (trader.products || []).filter((product) => {
+        const ownerId = Number(
+          product?.traderId
+          || product?.userId
+          || product?.ownerId
+          || product?.sellerId
+          || trader?.traderId
+          || 0
+        );
+
+        return !isCurrentTraderId(ownerId);
+      });
+
+      return {
+        ...trader,
+        products,
+        totalProducts: products.length,
+        totalStocks: products.reduce((sum, product) => sum + Number(product.stockQuantity || 0), 0),
+        totalSoldQuantity: products.reduce((sum, product) => sum + Number(product.totalSoldQuantity || 0), 0),
+        ratedProductCount: products.filter((product) => Number(product.ratingCount || 0) > 0).length,
+        averageRating: (() => {
+          const weighted = products.reduce((acc, product) => {
+            const rating = Number(product.averageRating || 0);
+            const ratingCount = Number(product.ratingCount || 0);
+            if (ratingCount <= 0 || !Number.isFinite(rating)) {
+              return acc;
+            }
+
+            return {
+              ratingTotal: acc.ratingTotal + (rating * ratingCount),
+              countTotal: acc.countTotal + ratingCount,
+            };
+          }, { ratingTotal: 0, countTotal: 0 });
+
+          if (!weighted.countTotal) {
+            return null;
+          }
+
+          return Number((weighted.ratingTotal / weighted.countTotal).toFixed(1));
+        })(),
+      };
+    })
+    .filter((trader) => (trader.products || []).length > 0);
+}
+
+const selectedCartItems = computed(() => {
+  const selectedSet = new Set(selectedCartItemIds.value);
+  return cartItems.value.filter((item) => selectedSet.has(item.id));
+});
+
+const groupedCartByTrader = computed(() => {
+  const groups = new Map();
+
+  for (const item of cartItems.value) {
+    const traderName = String(item.traderName || 'Trader').trim() || 'Trader';
+
+    if (!groups.has(traderName)) {
+      groups.set(traderName, {
+        traderName,
+        items: [],
+      });
+    }
+
+    groups.get(traderName).items.push(item);
+  }
+
+  return Array.from(groups.values())
+    .sort((a, b) => a.traderName.localeCompare(b.traderName))
+    .map((group) => ({
+      ...group,
+      items: [...group.items].sort((a, b) => String(a.productName || '').localeCompare(String(b.productName || ''))),
+    }));
+});
+
+const selectedCartQuantity = computed(() => {
+  return selectedCartItems.value.reduce((total, item) => total + Number(item.quantity || 0), 0);
+});
+
+const selectedCartHasUnavailableStock = computed(() => {
+  return selectedCartItems.value.some((item) => {
+    const quantity = Number(item.quantity || 0);
+    const stock = Number(item.stockQuantity || 0);
+    return !Number.isInteger(quantity) || quantity <= 0 || quantity > stock;
+  });
+});
+
+const selectedCheckoutTraderIds = computed(() => {
+  return [...new Set(
+    selectedCartItems.value
+      .map((item) => Number(item.traderId || 0))
+      .filter((id) => Number.isInteger(id) && id > 0)
+  )];
+});
+
+const selectedCheckoutTrader = computed(() => {
+  if (selectedCheckoutTraderIds.value.length !== 1) {
+    return null;
+  }
+
+  const traderId = selectedCheckoutTraderIds.value[0];
+  return marketplace.value.find((trader) => Number(trader.traderId) === traderId) || null;
+});
+
+const needsSingleSellerForGcash = computed(() => checkoutPaymentMethod.value === 'gcash' && selectedCheckoutTraderIds.value.length !== 1);
+const isGcashAvailableForSelection = computed(() => {
+  return selectedCheckoutTraderIds.value.length === 1 && Boolean(selectedCheckoutTrader.value?.gcashQrPath);
+});
+
+const gcashUnavailableReason = computed(() => {
+  if (selectedCheckoutTraderIds.value.length !== 1) {
+    return 'Select items from one seller to continue with GCash.';
+  }
+
+  if (!selectedCheckoutTrader.value?.gcashQrPath) {
+    return 'Selected seller has no GCash receive QR configured yet.';
+  }
+
+  return '';
+});
+
+const allCartItemsSelected = computed(() => {
+  return cartItems.value.length > 0 && selectedCartItemIds.value.length === cartItems.value.length;
+});
+
+function withTrailingDots(value, maxLength = 44) {
+  const text = String(value || '').trim();
+  if (!text) return 'No description yet.';
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}.............`;
+}
+
+function withLongDots(value, maxLength = 18) {
+  const text = String(value || '').trim();
+  if (!text) return 'No name';
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}................`;
+}
+
+function traderInitial(name) {
+  const normalized = String(name || 'T').trim();
+  return (normalized[0] || 'T').toUpperCase();
+}
+
+function toImageUrl(path) {
+  if (!path) return '';
+  return toMediaUrl(path);
+}
+
+function totalCartQuantity() {
+  return cartItems.value.reduce((total, item) => total + Number(item.quantity || 0), 0);
+}
+
+function cartItemDescription(item) {
+  return withTrailingDots(`Size: ${item.size || 'N/A'} | Length: ${item.lengthCm ?? 'N/A'} cm | Qty: ${item.quantity}`, 58);
+}
+
+function formatCurrency(value) {
+  return new Intl.NumberFormat('en-PH', {
+    style: 'currency',
+    currency: 'PHP',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number(value || 0));
+}
+
+function itemLineTotal(item) {
+  const lineTotal = Number(item?.lineTotal);
+  if (Number.isFinite(lineTotal) && lineTotal >= 0) {
+    return lineTotal;
+  }
+
+  const fallback = Number(item?.unitPrice || 0) * Number(item?.quantity || 0);
+  return Number.isFinite(fallback) ? fallback : 0;
+}
+
+const selectedCartAmount = computed(() => {
+  return selectedCartItems.value.reduce((sum, item) => sum + itemLineTotal(item), 0);
+});
+
+function orderTotal(order) {
+  return (order?.items || []).reduce((sum, item) => sum + itemLineTotal(item), 0);
+}
+
+function refreshSavedAddress() {
+  currentAddress.value = getCheckoutAddress();
+}
+
+function syncSelectedCartItems() {
+  const validIds = new Set(cartItems.value.map((item) => item.id));
+  selectedCartItemIds.value = selectedCartItemIds.value.filter((id) => validIds.has(id));
+}
+
+function isCartItemSelected(itemId) {
+  return selectedCartItemIds.value.includes(itemId);
+}
+
+function toggleCartItemSelection(itemId) {
+  if (isCartItemSelected(itemId)) {
+    selectedCartItemIds.value = selectedCartItemIds.value.filter((id) => id !== itemId);
+    return;
+  }
+
+  selectedCartItemIds.value = [...selectedCartItemIds.value, itemId];
+}
+
+function toggleAllCartSelections() {
+  if (allCartItemsSelected.value) {
+    selectedCartItemIds.value = [];
+    return;
+  }
+
+  selectedCartItemIds.value = cartItems.value.map((item) => item.id);
+}
+
+function openAddressEditor() {
+  router.push({ name: 'trader-address-editor' });
+}
+
+function emitMyOrdersUpdated() {
+  window.dispatchEvent(new CustomEvent(MY_ORDERS_UPDATED_EVENT));
+}
+
+function formatOrderStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) return 'Unknown';
+  return normalized.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+}
+
+function formatOrderDate(dateValue) {
+  return new Date(dateValue).toLocaleString();
+}
+
+function normalizeOrderStatus(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isOrderActionLoading(orderId) {
+  return orderActionLoadingIds.value.includes(orderId);
+}
+
+function setOrderActionLoading(orderId, loading) {
+  if (loading) {
+    if (!orderActionLoadingIds.value.includes(orderId)) {
+      orderActionLoadingIds.value = [...orderActionLoadingIds.value, orderId];
+    }
+    return;
+  }
+
+  orderActionLoadingIds.value = orderActionLoadingIds.value.filter((id) => id !== orderId);
+}
+
+function openCancelOrderModal(order) {
+  const orderId = Number(order?.id || 0);
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    feedback.value = 'Invalid order selected.';
+    return;
+  }
+
+  if (normalizeOrderStatus(order.status) !== 'pending') {
+    feedback.value = 'This order can no longer be cancelled.';
+    return;
+  }
+
+  cancellingOrderId.value = orderId;
+  cancellationReason.value = '';
+  showCancelOrderModal.value = true;
+}
+
+function closeCancelOrderModal() {
+  showCancelOrderModal.value = false;
+  cancellingOrderId.value = null;
+  cancellationReason.value = '';
+}
+
+function openReceiveRatingModal(order) {
+  const orderId = Number(order?.id || 0);
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    feedback.value = 'Invalid order selected.';
+    return;
+  }
+
+  if (normalizeOrderStatus(order.status) !== 'to_receive') {
+    feedback.value = 'Only To Receive orders can be completed.';
+    return;
+  }
+
+  receivingOrderId.value = orderId;
+  receiveRating.value = 0;
+  receiveReview.value = '';
+  showReceiveRatingModal.value = true;
+}
+
+function closeReceiveRatingModal() {
+  showReceiveRatingModal.value = false;
+  receivingOrderId.value = null;
+  receiveRating.value = 0;
+  receiveReview.value = '';
+}
+
+function setReceiveRating(value) {
+  const rating = Number(value);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return;
+  }
+
+  receiveRating.value = rating;
+}
+
+async function submitCancelOrder() {
+  const orderId = Number(cancellingOrderId.value || 0);
+  const reason = String(cancellationReason.value || '').trim();
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    feedback.value = 'Invalid order selected.';
+    return;
+  }
+
+  if (!reason) {
+    feedback.value = 'Please provide cancellation reason.';
+    return;
+  }
+
+  setOrderActionLoading(orderId, true);
+  try {
+    await cancelMyOrder(orderId, reason);
+    const order = orders.value.find((row) => Number(row.id) === orderId);
+    if (order) {
+      order.status = 'cancelled';
+      order.cancellationReason = reason;
+    }
+    emitMyOrdersUpdated();
+    closeCancelOrderModal();
+  } catch (error) {
+    feedback.value = error.message;
+  } finally {
+    setOrderActionLoading(orderId, false);
+  }
+}
+
+async function markOrderAsReceived() {
+  const orderId = Number(receivingOrderId.value || 0);
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    feedback.value = 'Invalid order selected.';
+    return;
+  }
+
+  const rating = Number(receiveRating.value || 0);
+  const review = String(receiveReview.value || '').trim();
+
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    feedback.value = 'Please select a rating from 1 to 5 stars.';
+    return;
+  }
+
+  const order = orders.value.find((item) => Number(item.id) === orderId);
+  if (!order || normalizeOrderStatus(order.status) !== 'to_receive') {
+    feedback.value = 'Only To Receive orders can be completed.';
+    return;
+  }
+
+  setOrderActionLoading(orderId, true);
+  try {
+    await markMyOrderReceived(orderId, {
+      rating,
+      review,
+    });
+
+    order.status = 'completed';
+    order.buyerRating = rating;
+    order.buyerReview = review;
+    order.buyerRatedAt = new Date().toISOString();
+    emitMyOrdersUpdated();
+    closeReceiveRatingModal();
+  } catch (error) {
+    feedback.value = error.message;
+  } finally {
+    setOrderActionLoading(orderId, false);
+  }
+}
+
+function openCheckoutConfirmation() {
+  refreshSavedAddress();
+
+  if (!cartItems.value.length) {
+    feedback.value = 'Your cart is empty.';
+    return;
+  }
+
+  if (!selectedCartItems.value.length) {
+    feedback.value = 'Please select at least one cart item.';
+    return;
+  }
+
+  if (selectedCartHasUnavailableStock.value) {
+    feedback.value = 'One or more selected items no longer have enough stock. Please refresh your cart.';
+    loadCart({ silent: true });
+    return;
+  }
+
+  const address = currentAddress.value;
+  if (
+    !address ||
+    !address.fullName ||
+    !address.contactNumber ||
+    !address.streetAddress ||
+    !address.regionName ||
+    !address.provinceName ||
+    !address.cityName ||
+    !address.barangayName
+  ) {
+    feedback.value = 'Please save your delivery address first.';
+    return;
+  }
+
+  showCheckoutConfirmModal.value = true;
+}
+
+function closeCheckoutConfirmation() {
+  showCheckoutConfirmModal.value = false;
+}
+
+function onSelectPaymentReceipt(event) {
+  const [file] = event.target.files || [];
+  paymentReceiptFile.value = file || null;
+}
+
+function downloadSelectedTraderQr() {
+  const qrPath = selectedCheckoutTrader.value?.gcashQrPath;
+  const url = toImageUrl(qrPath);
+  if (!url) {
+    return;
+  }
+
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = 'gcash-qr-code';
+  anchor.target = '_blank';
+  anchor.rel = 'noopener';
+  anchor.click();
+}
+
+async function confirmCheckoutSelection() {
+  if (!selectedCartItems.value.length) {
+    feedback.value = 'Please keep at least one item selected to checkout.';
+    return;
+  }
+
+  if (selectedCartHasUnavailableStock.value) {
+    feedback.value = 'One or more selected items no longer have enough stock. Please refresh your cart.';
+    showCheckoutConfirmModal.value = false;
+    await loadCart();
+    return;
+  }
+
+  const success = await checkoutCart();
+  if (success) {
+    showCheckoutConfirmModal.value = false;
+  }
+}
+
+function openProductFromCart(item) {
+  router.push({
+    name: 'trader-browse-products',
+    query: {
+      traderId: String(item.traderId),
+      productId: String(item.productId),
+    },
+  });
+}
+
+function isQuantityUpdating(itemId) {
+  return quantityUpdatingIds.value.includes(itemId);
+}
+
+function setQuantityUpdating(itemId, isUpdating) {
+  if (isUpdating) {
+    if (!quantityUpdatingIds.value.includes(itemId)) {
+      quantityUpdatingIds.value = [...quantityUpdatingIds.value, itemId];
+    }
+    return;
+  }
+
+  quantityUpdatingIds.value = quantityUpdatingIds.value.filter((id) => id !== itemId);
+}
+
+async function updateCartItemQuantity(item, nextQuantity) {
+  const normalizedQuantity = Number(nextQuantity);
+  if (!Number.isInteger(normalizedQuantity) || normalizedQuantity <= 0) {
+    feedback.value = 'Quantity must be a positive whole number.';
+    return;
+  }
+
+  if (normalizedQuantity > Number(item.stockQuantity || 0)) {
+    feedback.value = `Only ${item.stockQuantity} stock available for ${item.productName}.`;
+    return;
+  }
+
+  if (normalizedQuantity === Number(item.quantity || 0)) {
+    return;
+  }
+
+  setQuantityUpdating(item.id, true);
+  try {
+    await updateCartItemQuantityApi(item.id, normalizedQuantity);
+    const targetItem = cartItems.value.find((cartItem) => cartItem.id === item.id);
+    if (targetItem) {
+      targetItem.quantity = normalizedQuantity;
+    }
+  } catch (error) {
+    feedback.value = error.message;
+  } finally {
+    setQuantityUpdating(item.id, false);
+  }
+}
+
+function onQuantityInputChange(item, event) {
+  const requestedQuantity = Number(event.target.value);
+  if (!Number.isInteger(requestedQuantity) || requestedQuantity <= 0) {
+    event.target.value = item.quantity;
+    feedback.value = 'Quantity must be a positive whole number.';
+    return;
+  }
+
+  updateCartItemQuantity(item, requestedQuantity);
+}
+
+function decreaseCartItemQuantity(item) {
+  updateCartItemQuantity(item, Number(item.quantity || 0) - 1);
+}
+
+function increaseCartItemQuantity(item) {
+  updateCartItemQuantity(item, Number(item.quantity || 0) + 1);
+}
+
+async function loadProducts(options = {}) {
+  const { silent = false } = options;
+  if (!silent) {
+    loadingProducts.value = true;
+  }
+
+  try {
+    const data = await fetchTraderProducts();
+    products.value = data.products || [];
+  } catch (error) {
+    if (!silent) {
+      feedback.value = error.message;
+    }
+  } finally {
+    if (!silent) {
+      loadingProducts.value = false;
+    }
+  }
+}
+
+function onSelectImage(event) {
+  const [file] = event.target.files || [];
+  form.productImage = file || null;
+}
+
+function openEditProductModal(product) {
+  editingProduct.value = product;
+  editProductForm.productName = String(product.productName || '').trim();
+  editProductForm.size = String(product.size || 'small').toLowerCase();
+  editProductForm.lengthCm = product.lengthCm ?? '';
+  editProductForm.productPrice = Number(product.productPrice || 0);
+  editProductForm.stockQuantity = Number(product.stockQuantity || 0);
+  editProductForm.productImage = null;
+  showProductEditModal.value = true;
+}
+
+function closeEditProductModal() {
+  showProductEditModal.value = false;
+  editingProduct.value = null;
+  editProductForm.productName = '';
+  editProductForm.size = 'small';
+  editProductForm.lengthCm = '';
+  editProductForm.productPrice = 0;
+  editProductForm.stockQuantity = 0;
+  editProductForm.productImage = null;
+}
+
+function onSelectEditImage(event) {
+  const [file] = event.target.files || [];
+  editProductForm.productImage = file || null;
+}
+
+function emitInventoryUpdated() {
+  window.dispatchEvent(new CustomEvent('cocolytics-inventory-updated'));
+}
+
+function normalizeTabForRoute(preferredTab) {
+  const normalized = String(preferredTab || '').trim().toLowerCase();
+
+  if (isManageProductsRoute.value) {
+    return MANAGE_PRODUCTS_TABS.includes(normalized) ? normalized : 'add-product';
+  }
+
+  return MARKETPLACE_HUB_TABS.includes(normalized) ? normalized : 'marketplace';
+}
+
+async function saveEditedProduct() {
+  const product = editingProduct.value;
+  if (!product) return;
+
+  productSaving.value = true;
+  try {
+    await updateTraderProduct(product.id, {
+      productName: editProductForm.productName,
+      size: editProductForm.size,
+      lengthCm: editProductForm.lengthCm,
+      productPrice: editProductForm.productPrice,
+      stockQuantity: editProductForm.stockQuantity,
+      productImage: editProductForm.productImage,
+    });
+
+    feedback.value = 'Product updated successfully.';
+    await Promise.all([loadProducts(), loadMarketplace()]);
+    emitInventoryUpdated();
+    closeEditProductModal();
+  } catch (error) {
+    feedback.value = error.message;
+  } finally {
+    productSaving.value = false;
+  }
+}
+
+function isDeletingProduct(productId) {
+  return Number(deletingProductId.value) === Number(productId);
+}
+
+function openDeleteProductConfirmModal(product) {
+  const productId = Number(product?.id || 0);
+  if (!Number.isInteger(productId) || productId <= 0) {
+    feedback.value = 'Invalid product selected.';
+    return;
+  }
+
+  pendingDeleteProduct.value = product;
+  showDeleteProductConfirmModal.value = true;
+}
+
+function closeDeleteProductConfirmModal() {
+  if (deletingProductId.value !== null) {
+    return;
+  }
+
+  showDeleteProductConfirmModal.value = false;
+  pendingDeleteProduct.value = null;
+}
+
+async function deleteInventoryProduct() {
+  const product = pendingDeleteProduct.value;
+  const productId = Number(product?.id || 0);
+  if (!Number.isInteger(productId) || productId <= 0) {
+    feedback.value = 'Invalid product selected.';
+    showDeleteProductConfirmModal.value = false;
+    pendingDeleteProduct.value = null;
+    return;
+  }
+
+  deletingProductId.value = productId;
+  try {
+    await removeTraderProduct(productId);
+    feedback.value = 'Product deleted successfully.';
+    await Promise.all([loadProducts(), loadMarketplace()]);
+    emitInventoryUpdated();
+    showDeleteProductConfirmModal.value = false;
+    pendingDeleteProduct.value = null;
+  } catch (error) {
+    feedback.value = error.message;
+  } finally {
+    deletingProductId.value = null;
+  }
+}
+
+async function loadMarketplace(options = {}) {
+  const { silent = false } = options;
+  if (!silent) {
+    loadingMarketplace.value = true;
+  }
+
+  try {
+    const data = await fetchMarketplaceTraders();
+    marketplace.value = sanitizeTraderRows(data.traders || []);
+  } catch (error) {
+    if (!silent) {
+      feedback.value = error.message;
+    }
+  } finally {
+    if (!silent) {
+      loadingMarketplace.value = false;
+    }
+  }
+}
+
+async function loadCart(options = {}) {
+  const { silent = false } = options;
+  if (!silent) {
+    loadingCart.value = true;
+  }
+
+  try {
+    const data = await fetchCartItems();
+    cartItems.value = data.items || [];
+    syncSelectedCartItems();
+  } catch (error) {
+    if (!silent) {
+      feedback.value = error.message;
+    }
+  } finally {
+    if (!silent) {
+      loadingCart.value = false;
+    }
+  }
+}
+
+async function loadOrders(options = {}) {
+  const { silent = false } = options;
+  if (!silent) {
+    loadingOrders.value = true;
+  }
+
+  try {
+    const data = await fetchMyOrders();
+    orders.value = data.orders || [];
+    emitMyOrdersUpdated();
+  } catch (error) {
+    if (!silent) {
+      feedback.value = error.message;
+    }
+  } finally {
+    if (!silent) {
+      loadingOrders.value = false;
+    }
+  }
+}
+
+async function refreshActiveTabData() {
+  const active = String(activeTab.value || '').trim().toLowerCase();
+
+  if (active === 'add-product') {
+    await loadProducts({ silent: true });
+    return;
+  }
+
+  if (active === 'inventory') {
+    await loadProducts({ silent: true });
+    return;
+  }
+
+  if (active === 'marketplace') {
+    await loadMarketplace({ silent: true });
+    return;
+  }
+
+  if (active === 'cart') {
+    await Promise.all([
+      loadCart({ silent: true }),
+      loadMarketplace({ silent: true }),
+    ]);
+    return;
+  }
+
+  if (active === 'orders') {
+    await loadOrders({ silent: true });
+  }
+}
+
+function startMarketplaceRealtimePolling() {
+  if (marketplaceRealtimeTimer) {
+    clearInterval(marketplaceRealtimeTimer);
+    marketplaceRealtimeTimer = null;
+  }
+
+  marketplaceRealtimeTimer = setInterval(() => {
+    if (document.visibilityState !== 'visible') {
+      return;
+    }
+
+    refreshActiveTabData().catch(() => {});
+  }, FAST_MARKETPLACE_POLL_MS);
+}
+
+function stopMarketplaceRealtimePolling() {
+  if (marketplaceRealtimeTimer) {
+    clearInterval(marketplaceRealtimeTimer);
+    marketplaceRealtimeTimer = null;
+  }
+}
+
+function goToBrowseProducts(traderId) {
+  const query = traderId ? { traderId: String(traderId) } : {};
+  router.push({ name: 'trader-browse-products', query });
+}
+
+function messageTrader(trader) {
+  const traderId = Number(trader?.traderId);
+  if (!Number.isInteger(traderId) || traderId <= 0) {
+    feedback.value = 'Invalid trader selected.';
+    return;
+  }
+
+  const currentUserId = Number(getUser()?.id || 0);
+  if (currentUserId > 0 && traderId === currentUserId) {
+    feedback.value = 'You cannot message your own account.';
+    return;
+  }
+
+  router.push({
+    name: 'trader-messages',
+    query: {
+      traderId: String(traderId),
+      traderName: String(trader?.name || 'Trader'),
+    },
+  });
+}
+
+async function removeItemFromCart(itemId) {
+  try {
+    await removeCartItem(itemId);
+    feedback.value = 'Item removed from cart.';
+    await loadCart();
+  } catch (error) {
+    feedback.value = error.message;
+  }
+}
+
+async function checkoutCart() {
+  refreshSavedAddress();
+
+  if (!cartItems.value.length) {
+    feedback.value = 'Your cart is empty.';
+    return false;
+  }
+
+  if (!selectedCartItems.value.length) {
+    feedback.value = 'Please select at least one cart item.';
+    return false;
+  }
+
+  const address = currentAddress.value;
+  if (
+    !address ||
+    !address.fullName ||
+    !address.contactNumber ||
+    !address.streetAddress ||
+    !address.regionName ||
+    !address.provinceName ||
+    !address.cityName ||
+    !address.barangayName
+  ) {
+    feedback.value = 'Please save your delivery address first.';
+    return false;
+  }
+
+  if (checkoutPaymentMethod.value === 'gcash') {
+    if (selectedCheckoutTraderIds.value.length !== 1) {
+      feedback.value = 'GCash checkout currently supports one seller per checkout.';
+      return false;
+    }
+
+    if (!selectedCheckoutTrader.value?.gcashQrPath) {
+      feedback.value = 'Selected seller has no GCash QR configured yet.';
+      return false;
+    }
+
+    if (!paymentReceiptFile.value) {
+      feedback.value = 'Please upload your GCash payment receipt.';
+      return false;
+    }
+  }
+
+  try {
+    const orderResult = await placeMyOrder({
+      fullName: address.fullName,
+      contactNumber: address.contactNumber,
+      streetAddress: address.streetAddress,
+      regionName: address.regionName,
+      provinceName: address.provinceName,
+      cityName: address.cityName,
+      barangayName: address.barangayName,
+      paymentMethod: checkoutPaymentMethod.value,
+      paymentReceiptImage: paymentReceiptFile.value,
+      deliveryNotes: address.deliveryNotes || '',
+      selectedCartItemIds: selectedCartItemIds.value,
+    });
+
+    if (checkoutPaymentMethod.value === 'paymongo' && orderResult.checkoutUrl) {
+      window.location.assign(orderResult.checkoutUrl);
+      return true;
+    }
+
+    feedback.value = 'Order placed successfully.';
+    await Promise.all([loadCart(), loadOrders(), loadMarketplace(), loadProducts()]);
+    activeTab.value = 'orders';
+    checkoutPaymentMethod.value = 'cash_on_delivery';
+    paymentReceiptFile.value = null;
+    return true;
+  } catch (error) {
+    feedback.value = error.message;
+    return false;
+  }
+}
+
+async function submitProduct() {
+  feedback.value = '';
+  saving.value = true;
+  try {
+    await createTraderProduct({ ...form });
+    feedback.value = 'Product added successfully.';
+    form.productName = '';
+    form.size = 'small';
+    form.lengthCm = '';
+    form.productPrice = 0;
+    form.stockQuantity = 0;
+    form.productImage = null;
+    await Promise.all([loadProducts(), loadMarketplace()]);
+    activeTab.value = 'inventory';
+  } catch (error) {
+    feedback.value = error.message;
+  } finally {
+    saving.value = false;
+  }
+}
+
+onMounted(async () => {
+  checkoutPaymentMethod.value = 'cash_on_delivery';
+  paymentReceiptFile.value = null;
+  activeTab.value = normalizeTabForRoute(route.query.tab);
+
+  if (String(route.query.addressSaved || '') === '1') {
+    feedback.value = 'Address saved successfully.';
+  }
+
+  const currentUser = getUser() || {};
+  if (!getCheckoutAddress()) {
+    currentAddress.value = {
+      fullName: String(currentUser.fullName || currentUser.profileName || '').trim(),
+      contactNumber: String(currentUser.contactNumber || '').trim(),
+      streetAddress: '',
+      regionCode: '',
+      regionName: '',
+      provinceCode: '',
+      provinceName: '',
+      cityCode: '',
+      cityName: '',
+      barangayCode: '',
+      barangayName: '',
+      deliveryNotes: '',
+      paymentMethod: 'cash_on_delivery',
+    };
+  }
+
+  refreshSavedAddress();
+  await Promise.all([loadProducts(), loadMarketplace(), loadCart(), loadOrders()]);
+  startMarketplaceRealtimePolling();
+
+  const selectedCartItemIdFromQuery = Number(route.query.selectCartItemId);
+  if (Number.isInteger(selectedCartItemIdFromQuery) && selectedCartItemIdFromQuery > 0) {
+    const exists = cartItems.value.some((item) => item.id === selectedCartItemIdFromQuery);
+    if (exists && !selectedCartItemIds.value.includes(selectedCartItemIdFromQuery)) {
+      selectedCartItemIds.value = [...selectedCartItemIds.value, selectedCartItemIdFromQuery];
+    }
+  }
+});
+
+onUnmounted(() => {
+  stopMarketplaceRealtimePolling();
+});
+
+watch(
+  () => route.name,
+  () => {
+    activeTab.value = normalizeTabForRoute(activeTab.value);
+  }
+);
+
+watch(checkoutPaymentMethod, (value) => {
+  if (value !== 'gcash') {
+    paymentReceiptFile.value = null;
+  }
+});
+
+watch(isGcashAvailableForSelection, (isAvailable) => {
+  if (!isAvailable && checkoutPaymentMethod.value === 'gcash') {
+    checkoutPaymentMethod.value = 'cash_on_delivery';
+  }
+});
+</script>
+
+<template>
+  <section class="page">
+    <header class="head">
+      <p class="kicker">Trader Marketplace</p>
+      <h1>{{ pageTitle }}</h1>
+      <p class="sub">{{ pageSubtitle }}</p>
+    </header>
+
+    <nav class="tabs">
+      <button
+        v-if="isManageProductsRoute"
+        type="button"
+        :class="{ active: activeTab === 'add-product' }"
+        @click="activeTab = 'add-product'"
+      >
+        Add Product
+      </button>
+      <button
+        v-if="isManageProductsRoute"
+        type="button"
+        :class="{ active: activeTab === 'inventory' }"
+        @click="activeTab = 'inventory'"
+      >
+        My Inventory
+      </button>
+      <button
+        v-if="!isManageProductsRoute"
+        type="button"
+        :class="{ active: activeTab === 'inventory' }"
+        @click="activeTab = 'inventory'"
+      >
+        My Inventory ({{ inventoryCount }})
+      </button>
+      <button
+        v-if="!isManageProductsRoute"
+        type="button"
+        :class="{ active: activeTab === 'marketplace' }"
+        @click="activeTab = 'marketplace'"
+      >
+        Marketplace
+      </button>
+      <button
+        v-if="!isManageProductsRoute"
+        type="button"
+        :class="{ active: activeTab === 'cart' }"
+        @click="activeTab = 'cart'"
+      >
+        My Cart ({{ totalCartQuantity() }})
+      </button>
+      <button
+        v-if="!isManageProductsRoute"
+        type="button"
+        :class="{ active: activeTab === 'orders' }"
+        @click="activeTab = 'orders'"
+      >
+        Orders ({{ orderCount }})
+      </button>
+    </nav>
+
+    <form v-if="isManageProductsRoute && activeTab === 'add-product'" class="form" @submit.prevent="submitProduct">
+      <label>
+        Product Name
+        <input v-model="form.productName" type="text" placeholder="Product name" required />
+      </label>
+
+      <label>
+        Size
+        <select v-model="form.size" required>
+          <option value="small">Small</option>
+          <option value="medium">Medium</option>
+          <option value="large">Large</option>
+        </select>
+      </label>
+
+      <label>
+        Length (cm)
+        <input v-model="form.lengthCm" type="number" step="0.01" min="0" placeholder="Optional" />
+      </label>
+
+      <label>
+        Product Price (PHP)
+        <input v-model.number="form.productPrice" type="number" step="0.01" min="0" required />
+      </label>
+
+      <label>
+        Stock Quantity
+        <input v-model.number="form.stockQuantity" type="number" min="0" step="1" required />
+      </label>
+
+      <label>
+        Product Image (optional)
+        <input type="file" accept="image/*" @change="onSelectImage" />
+      </label>
+
+      <button type="submit" :disabled="saving">{{ saving ? 'Adding...' : 'Add Product' }}</button>
+    </form>
+
+    <p v-if="feedback" class="feedback">{{ feedback }}</p>
+
+    <section v-if="activeTab === 'inventory'" class="list-panel">
+      <h2>Your Products ({{ inventoryCount }})</h2>
+      <p v-if="loadingProducts" class="muted">Loading products...</p>
+      <p v-else-if="!products.length" class="muted">No products yet.</p>
+
+      <div v-else :class="['products', 'inventory-products', { 'single-item': products.length === 1 }]">
+        <article
+          v-for="product in products"
+          :key="product.id"
+          class="product-card clickable"
+          @click="openEditProductModal(product)"
+        >
+          <img v-if="product.productImagePath" :src="toImageUrl(product.productImagePath)" alt="Product" />
+          <div class="inventory-product-content">
+            <h3 :title="product.productName">{{ withLongDots(product.productName, 16) }}</h3>
+            <p>Size: {{ product.size }}</p>
+            <p>Length: {{ product.lengthCm ?? 'N/A' }} cm</p>
+            <p>Price: PHP {{ Number(product.productPrice || 0).toFixed(2) }}</p>
+            <p>Stock: {{ product.stockQuantity }}</p>
+            <div class="inventory-actions">
+              <button type="button" class="mini-btn" @click.stop="openEditProductModal(product)">Edit Product</button>
+              <button
+                type="button"
+                class="mini-btn danger"
+                :disabled="isDeletingProduct(product.id)"
+                @click.stop="openDeleteProductConfirmModal(product)"
+              >
+                {{ isDeletingProduct(product.id) ? 'Deleting...' : 'Delete' }}
+              </button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <ConfirmationModal
+      :visible="showDeleteProductConfirmModal"
+      title="Delete Product"
+      :message="deleteProductConfirmMessage"
+      :confirm-label="deletingProductId !== null ? 'Deleting...' : 'Delete Product'"
+      cancel-label="Keep Product"
+      :danger="true"
+      @cancel="closeDeleteProductConfirmModal"
+      @confirm="deleteInventoryProduct"
+    />
+
+    <section v-if="!isManageProductsRoute && activeTab === 'marketplace'" class="list-panel">
+      <h2>All Traders</h2>
+      <p v-if="loadingMarketplace" class="muted">Loading marketplace...</p>
+      <p v-else-if="!marketplace.length" class="muted">No trader data available yet.</p>
+
+      <div v-else class="traders-grid">
+        <article v-for="trader in marketplace" :key="trader.traderId" class="trader-card">
+          <img
+            v-if="trader.profileImagePath"
+            :src="toImageUrl(trader.profileImagePath)"
+            :alt="`${trader.name || 'Trader'} profile`"
+            class="trader-avatar"
+          />
+          <div v-else class="trader-avatar placeholder">{{ traderInitial(trader.name) }}</div>
+          <h3>{{ trader.name || 'Trader' }}</h3>
+          <p class="desc" :title="trader.description || 'No description yet.'">
+            {{ withTrailingDots(trader.description) }}
+          </p>
+          <p class="meta">Total Products: {{ trader.totalProducts }}</p>
+          <p class="meta">Total Stocks: {{ trader.totalStocks }}</p>
+          <p class="meta">Total Sold: {{ trader.totalSoldQuantity || 0 }}</p>
+          <p class="meta">
+            Average Rating:
+            {{ trader.averageRating ? `${trader.averageRating}/5` : 'No ratings yet' }}
+          </p>
+          <p class="meta">Contact: {{ trader.contactNumber || 'N/A' }}</p>
+          <p class="meta">Address: {{ trader.businessAddress || 'N/A' }}</p>
+
+          <div class="actions">
+            <button type="button" class="mini-btn" @click="goToBrowseProducts(trader.traderId)">
+              View Products
+            </button>
+            <button type="button" class="mini-btn message" @click="messageTrader(trader)">
+              Message
+            </button>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section v-if="!isManageProductsRoute && activeTab === 'cart'" class="list-panel">
+      <h2>My Cart ({{ totalCartQuantity() }})</h2>
+      <p v-if="loadingCart" class="muted">Loading cart...</p>
+      <p v-else-if="!cartItems.length" class="muted">Cart is empty.</p>
+
+      <div v-else class="checkout-wrap">
+        <div class="cart-head-actions">
+          <button type="button" class="mini-btn" @click="openAddressEditor">Address Editor</button>
+          <button type="button" class="mini-btn" @click="toggleAllCartSelections">
+            {{ allCartItemsSelected ? 'Unselect All' : 'Select All' }}
+          </button>
+        </div>
+
+        <div class="address-preview" v-if="currentAddress">
+          <h3 class="checkout-title">Delivery Address</h3>
+          <p>
+            {{ currentAddress.fullName || 'No name' }} | {{ currentAddress.contactNumber || 'No contact' }}
+          </p>
+          <p>
+            {{ currentAddress.streetAddress || 'No street address' }},
+            {{ currentAddress.barangayName || 'No barangay' }},
+            {{ currentAddress.cityName || 'No city' }},
+            {{ currentAddress.provinceName || 'No province' }},
+            {{ currentAddress.regionName || 'No region' }}
+          </p>
+          <p>Delivery Notes: {{ currentAddress.deliveryNotes || 'None' }}</p>
+          <p>
+            Payment:
+            {{ checkoutPaymentMethod === 'paymongo' ? 'PayMongo' : checkoutPaymentMethod === 'gcash' ? 'Manual GCash' : 'Cash on Delivery' }}
+          </p>
+        </div>
+
+        <div class="cart-groups">
+          <section v-for="group in groupedCartByTrader" :key="group.traderName" class="trader-group">
+            <header class="trader-group-head">
+              <h3>{{ group.traderName }}</h3>
+            </header>
+
+            <article v-for="item in group.items" :key="item.id" class="cart-row">
+              <label class="cart-check inline">
+                <input
+                  type="checkbox"
+                  :checked="isCartItemSelected(item.id)"
+                  @change="toggleCartItemSelection(item.id)"
+                />
+              </label>
+
+              <img
+                v-if="item.productImagePath"
+                :src="toImageUrl(item.productImagePath)"
+                alt="Product"
+                class="cart-image"
+              />
+              <div v-else class="cart-image placeholder">No Image</div>
+
+              <div class="cart-content">
+                <button type="button" class="product-link" @click="openProductFromCart(item)">
+                  {{ withTrailingDots(item.productName, 34) }}
+                </button>
+                <p class="desc-line">{{ cartItemDescription(item) }}</p>
+                <p class="stock-line">Unit Price: {{ formatCurrency(item.unitPrice) }}</p>
+                <p class="stock-line">Line Total: {{ formatCurrency(itemLineTotal(item)) }}</p>
+                <p class="stock-line">Stock Left: {{ item.stockQuantity }}</p>
+              </div>
+
+              <div class="cart-right">
+                <div class="qty-controls">
+                  <button
+                    type="button"
+                    class="qty-btn"
+                    :disabled="isQuantityUpdating(item.id) || Number(item.quantity) <= 1"
+                    @click="decreaseCartItemQuantity(item)"
+                  >
+                    -
+                  </button>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    class="qty-input"
+                    :value="item.quantity"
+                    :max="item.stockQuantity"
+                    :disabled="isQuantityUpdating(item.id)"
+                    @change="onQuantityInputChange(item, $event)"
+                  />
+                  <button
+                    type="button"
+                    class="qty-btn"
+                    :disabled="isQuantityUpdating(item.id) || Number(item.quantity) >= Number(item.stockQuantity)"
+                    @click="increaseCartItemQuantity(item)"
+                  >
+                    +
+                  </button>
+                </div>
+                <button type="button" class="mini-btn danger" @click="removeItemFromCart(item.id)">
+                  Remove
+                </button>
+              </div>
+            </article>
+          </section>
+        </div>
+
+        <section class="summary-box">
+          <h3 class="checkout-title">Selected Order Summary</h3>
+          <p>Selected Items: {{ selectedCartItems.length }}</p>
+          <p>Total Quantity: {{ selectedCartQuantity }}</p>
+          <p>Total Amount: {{ formatCurrency(selectedCartAmount) }}</p>
+
+          <ul v-if="selectedCartItems.length" class="summary-list">
+            <li v-for="item in selectedCartItems" :key="item.id">
+              {{ item.productName }} | {{ item.size }} | Qty {{ item.quantity }} | {{ formatCurrency(itemLineTotal(item)) }}
+            </li>
+          </ul>
+          <p v-else class="muted">Select cart cards to checkout.</p>
+
+          <button type="button" class="checkout-btn" @click="openCheckoutConfirmation">Checkout Selected</button>
+        </section>
+      </div>
+    </section>
+
+    <section v-if="!isManageProductsRoute && activeTab === 'orders'" class="list-panel">
+      <h2>My Orders ({{ filteredOrderCount }}/{{ orderCount }})</h2>
+
+      <div class="order-tools">
+        <input
+          v-model="orderSearch"
+          type="text"
+          class="order-search-input"
+          placeholder="Search order #, product, trader, address"
+        />
+        <select v-model="orderStatusFilter" class="order-status-select">
+          <option v-for="item in orderStatusFilters" :key="item.key" :value="item.key">
+            {{ item.label }}
+          </option>
+        </select>
+      </div>
+
+      <p class="order-count-line">Showing {{ filteredOrderCount }} of {{ orderCount }} orders</p>
+      <p v-if="loadingOrders" class="muted">Loading orders...</p>
+      <p v-else-if="!orderCount" class="muted">No orders yet.</p>
+      <p v-else-if="!filteredOrderCount" class="muted">No matching orders found.</p>
+
+      <div v-else class="orders-cards">
+        <article v-for="order in filteredOrders" :key="order.id" class="order-card">
+          <header class="order-head">
+            <div>
+              <h3>Order #{{ order.id }}</h3>
+              <p>{{ formatOrderDate(order.createdAt) }}</p>
+            </div>
+            <span class="badge">{{ formatOrderStatus(order.status) }}</span>
+          </header>
+
+          <div class="order-meta">
+            <p><strong>Full Name:</strong> {{ order.customerFullName || '-' }}</p>
+            <p><strong>Contact:</strong> {{ order.customerContactNumber || '-' }}</p>
+            <p><strong>Address:</strong> {{ order.deliveryFullAddress || '-' }}</p>
+            <p>
+              <strong>Payment:</strong>
+              {{ order.paymentMethod || 'cash_on_delivery' }}
+              <span v-if="order.paymentStatus"> ({{ order.paymentStatus }})</span>
+            </p>
+            <p><strong>Delivery Notes:</strong> {{ order.deliveryNotes || '-' }}</p>
+            <p><strong>Order Total:</strong> {{ formatCurrency(orderTotal(order)) }}</p>
+            <p v-if="normalizeOrderStatus(order.status) === 'cancelled' && order.cancellationReason">
+              <strong>Cancellation Reason:</strong> {{ order.cancellationReason }}
+            </p>
+            <p v-if="normalizeOrderStatus(order.status) === 'completed'">
+              <strong>Your Rating:</strong>
+              {{ order.buyerRating ? `${order.buyerRating}/5` : '-' }}
+              <span v-if="order.buyerReview">| {{ order.buyerReview }}</span>
+            </p>
+          </div>
+
+          <div class="order-items">
+            <article v-for="item in order.items" :key="item.id" class="order-item-row">
+              <img
+                v-if="item.productImagePath"
+                :src="toImageUrl(item.productImagePath)"
+                alt="Product"
+                class="cart-image"
+              />
+              <div v-else class="cart-image placeholder">No Image</div>
+
+              <div class="cart-content">
+                <p class="order-product">{{ withTrailingDots(item.productName, 36) }}</p>
+                <p class="desc-line">Size: {{ item.size || 'N/A' }} | Length: {{ item.lengthCm ?? 'N/A' }} cm</p>
+                <p class="stock-line">Unit Price: {{ formatCurrency(item.unitPrice) }}</p>
+                <p class="stock-line">Trader: {{ item.traderName || 'Trader' }}</p>
+              </div>
+
+              <div class="cart-right">
+                <p class="order-qty">Qty: {{ item.quantity }}</p>
+                <p class="order-qty">Line Total: {{ formatCurrency(itemLineTotal(item)) }}</p>
+              </div>
+            </article>
+          </div>
+
+          <div class="order-actions">
+            <button
+              v-if="normalizeOrderStatus(order.status) === 'pending'"
+              type="button"
+              class="mini-btn danger"
+              :disabled="isOrderActionLoading(order.id)"
+              @click="openCancelOrderModal(order)"
+            >
+              {{ isOrderActionLoading(order.id) ? 'Please wait...' : 'Cancel Order' }}
+            </button>
+            <button
+              v-if="normalizeOrderStatus(order.status) === 'to_receive'"
+              type="button"
+              class="mini-btn"
+              :disabled="isOrderActionLoading(order.id)"
+              @click="openReceiveRatingModal(order)"
+            >
+              {{ isOrderActionLoading(order.id) ? 'Please wait...' : 'Received' }}
+            </button>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <div
+      v-if="showCheckoutConfirmModal"
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Confirm checkout"
+      @click.self="closeCheckoutConfirmation"
+    >
+      <section class="modal-card">
+        <header class="modal-head">
+          <h3>Confirm Your Checkout</h3>
+          <button type="button" class="mini-btn" @click="closeCheckoutConfirmation">Close</button>
+        </header>
+
+        <p class="muted modal-subtext">
+          Double check your selected items below. You can change quantity or unselect before confirming.
+        </p>
+
+        <div class="modal-item-list">
+          <article v-for="item in selectedCartItems" :key="`confirm-${item.id}`" class="cart-row confirm-row">
+            <label class="cart-check inline">
+              <input
+                type="checkbox"
+                :checked="isCartItemSelected(item.id)"
+                @change="toggleCartItemSelection(item.id)"
+              />
+            </label>
+
+            <img
+              v-if="item.productImagePath"
+              :src="toImageUrl(item.productImagePath)"
+              alt="Product"
+              class="cart-image"
+            />
+            <div v-else class="cart-image placeholder">No Image</div>
+
+            <div class="cart-content">
+              <p class="order-product">{{ withTrailingDots(item.productName, 34) }}</p>
+              <p class="desc-line">Size: {{ item.size || 'N/A' }} | Length: {{ item.lengthCm ?? 'N/A' }} cm</p>
+              <p class="stock-line">Unit Price: {{ formatCurrency(item.unitPrice) }}</p>
+              <p class="stock-line">Line Total: {{ formatCurrency(itemLineTotal(item)) }}</p>
+              <p class="stock-line">Stock Left: {{ item.stockQuantity }} | Trader: {{ item.traderName }}</p>
+            </div>
+
+            <div class="cart-right">
+              <div class="qty-controls">
+                <button
+                  type="button"
+                  class="qty-btn"
+                  :disabled="isQuantityUpdating(item.id) || Number(item.quantity) <= 1"
+                  @click="decreaseCartItemQuantity(item)"
+                >
+                  -
+                </button>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  class="qty-input"
+                  :value="item.quantity"
+                  :max="item.stockQuantity"
+                  :disabled="isQuantityUpdating(item.id)"
+                  @change="onQuantityInputChange(item, $event)"
+                />
+                <button
+                  type="button"
+                  class="qty-btn"
+                  :disabled="isQuantityUpdating(item.id) || Number(item.quantity) >= Number(item.stockQuantity)"
+                  @click="increaseCartItemQuantity(item)"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <footer class="modal-actions">
+          <div class="payment-method-block">
+            <p class="payment-method-title">Payment Method</p>
+
+            <div class="payment-method-options" role="group" aria-label="Payment method">
+              <button
+                type="button"
+                class="payment-option"
+                :class="{ active: checkoutPaymentMethod === 'cash_on_delivery' }"
+                @click="checkoutPaymentMethod = 'cash_on_delivery'"
+              >
+                Cash on Delivery
+              </button>
+              <button
+                type="button"
+                class="payment-option"
+                :class="{ active: checkoutPaymentMethod === 'gcash' }"
+                :disabled="!isGcashAvailableForSelection"
+                @click="checkoutPaymentMethod = 'gcash'"
+              >
+                GCash
+              </button>
+              <button
+                type="button"
+                class="payment-option paymongo-option"
+                :class="{ active: checkoutPaymentMethod === 'paymongo' }"
+                @click="checkoutPaymentMethod = 'paymongo'"
+              >
+                PayMongo
+              </button>
+            </div>
+
+            <p v-if="!isGcashAvailableForSelection" class="muted">
+              {{ gcashUnavailableReason }}
+            </p>
+
+            <div v-if="checkoutPaymentMethod === 'gcash' && isGcashAvailableForSelection" class="gcash-box">
+              <p class="meta-line">Seller: {{ selectedCheckoutTrader?.name || 'Trader' }}</p>
+              <img
+                v-if="selectedCheckoutTrader?.gcashQrPath"
+                :src="toImageUrl(selectedCheckoutTrader.gcashQrPath)"
+                alt="Seller GCash QR"
+                class="gcash-qr-preview"
+              />
+              <p v-else class="muted">Seller has no GCash QR configured yet.</p>
+              <button v-if="selectedCheckoutTrader?.gcashQrPath" type="button" class="mini-btn" @click="downloadSelectedTraderQr">
+                Download QR
+              </button>
+
+              <label class="payment-method-label">
+                Upload GCash Receipt
+                <input type="file" accept="image/*" @change="onSelectPaymentReceipt" />
+              </label>
+            </div>
+            <p v-if="checkoutPaymentMethod === 'paymongo'" class="muted">
+              You will be redirected to PayMongo to pay securely by GCash, card, or Maya.
+            </p>
+          </div>
+
+          <p>
+            Selected Items: {{ selectedCartItems.length }} | Total Quantity: {{ selectedCartQuantity }} |
+            Total Amount: {{ formatCurrency(selectedCartAmount) }}
+          </p>
+          <button
+            type="button"
+            class="checkout-btn"
+            :disabled="!selectedCartItems.length || selectedCartHasUnavailableStock || (checkoutPaymentMethod === 'gcash' && (!isGcashAvailableForSelection || !paymentReceiptFile || needsSingleSellerForGcash))"
+            @click="confirmCheckoutSelection"
+          >
+            {{ checkoutPaymentMethod === 'paymongo' ? 'Continue to PayMongo' : 'Confirm Checkout (Pending Seller Acceptance)' }}
+          </button>
+        </footer>
+      </section>
+    </div>
+
+    <div
+      v-if="showReceiveRatingModal"
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Rate order"
+      @click.self="closeReceiveRatingModal"
+    >
+      <section class="modal-card product-edit-modal">
+        <header class="modal-head">
+          <h3>Rate This Order</h3>
+          <button type="button" class="mini-btn" @click="closeReceiveRatingModal">Close</button>
+        </header>
+
+        <p class="muted">How was your order experience?</p>
+
+        <div class="rating-stars" role="group" aria-label="Order rating">
+          <button
+            v-for="star in 5"
+            :key="`star-${star}`"
+            type="button"
+            :class="['star-btn', { active: receiveRating >= star }]"
+            @click="setReceiveRating(star)"
+          >
+            ★
+          </button>
+        </div>
+
+        <label>
+          Review (optional)
+          <textarea
+            v-model="receiveReview"
+            rows="4"
+            maxlength="600"
+            placeholder="Share your experience"
+          ></textarea>
+        </label>
+
+        <footer class="modal-actions">
+          <button type="button" class="mini-btn" @click="closeReceiveRatingModal">Back</button>
+          <button
+            type="button"
+            class="mini-btn"
+            :disabled="!receiveRating || isOrderActionLoading(Number(receivingOrderId || 0))"
+            @click="markOrderAsReceived"
+          >
+            {{ isOrderActionLoading(Number(receivingOrderId || 0)) ? 'Submitting...' : 'Submit Rating & Complete' }}
+          </button>
+        </footer>
+      </section>
+    </div>
+
+    <div
+      v-if="showCancelOrderModal"
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Cancel order"
+      @click.self="closeCancelOrderModal"
+    >
+      <section class="modal-card product-edit-modal">
+        <header class="modal-head">
+          <h3>Cancel Order</h3>
+          <button type="button" class="mini-btn" @click="closeCancelOrderModal">Close</button>
+        </header>
+
+        <label>
+          Reason for cancellation
+          <textarea
+            v-model="cancellationReason"
+            rows="4"
+            maxlength="500"
+            placeholder="Enter reason here"
+          ></textarea>
+        </label>
+
+        <footer class="modal-actions">
+          <button type="button" class="mini-btn" @click="closeCancelOrderModal">Back</button>
+          <button type="button" class="mini-btn danger" @click="submitCancelOrder">Confirm Cancel</button>
+        </footer>
+      </section>
+    </div>
+
+    <div
+      v-if="showProductEditModal && editingProduct"
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Edit product"
+      @click.self="closeEditProductModal"
+    >
+      <section class="modal-card product-edit-modal">
+        <header class="modal-head">
+          <h3>Edit Product</h3>
+          <button type="button" class="mini-btn" @click="closeEditProductModal">Close</button>
+        </header>
+
+        <form class="form product-edit-form" @submit.prevent="saveEditedProduct">
+          <label>
+            Product Name
+            <input v-model="editProductForm.productName" type="text" required />
+          </label>
+
+          <label>
+            Size
+            <select v-model="editProductForm.size" required>
+              <option value="small">Small</option>
+              <option value="medium">Medium</option>
+              <option value="large">Large</option>
+            </select>
+          </label>
+
+          <label>
+            Length (cm)
+            <input v-model="editProductForm.lengthCm" type="number" step="0.01" min="0" />
+          </label>
+
+          <label>
+            Product Price (PHP)
+            <input v-model.number="editProductForm.productPrice" type="number" step="0.01" min="0" required />
+          </label>
+
+          <label>
+            Stock Quantity
+            <input v-model.number="editProductForm.stockQuantity" type="number" min="0" step="1" required />
+          </label>
+
+          <label>
+            Update Product Image (optional)
+            <input type="file" accept="image/*" @change="onSelectEditImage" />
+          </label>
+
+          <button type="submit" :disabled="productSaving">{{ productSaving ? 'Saving...' : 'Save Changes' }}</button>
+        </form>
+      </section>
+    </div>
+  </section>
+</template>
+
+<style scoped>
+.page {
+  color: #effff7;
+}
+
+.kicker {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.7rem;
+  color: #9cf5cd;
+}
+
+.head h1 {
+  margin: 0.45rem 0 0;
+}
+
+.sub {
+  margin: 0.35rem 0 0;
+  color: #c8fce6;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.tabs button {
+  border: 1px solid rgba(126, 223, 192, 0.35);
+  border-radius: 10px;
+  background: rgba(8, 44, 57, 0.85);
+  color: #dffef2;
+  padding: 0.5rem 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.tabs button.active {
+  background: #eaf6ef;
+  color: #346f60;
+}
+
+.form,
+.list-panel {
+  margin-top: 1rem;
+  border: 1px solid rgba(113, 215, 177, 0.35);
+  border-radius: 18px;
+  background: linear-gradient(165deg, rgba(8, 35, 46, 0.88), rgba(9, 59, 71, 0.68));
+  padding: 1rem;
+}
+
+.form {
+  display: grid;
+  gap: 0.8rem;
+}
+
+label {
+  display: grid;
+  gap: 0.32rem;
+  font-weight: 700;
+  color: #d5fff0;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid rgba(133, 229, 197, 0.45);
+  border-radius: 10px;
+  background: rgba(5, 27, 37, 0.75);
+  color: #ecfff7;
+  padding: 0.62rem 0.7rem;
+  font: inherit;
+}
+
+button {
+  border: 1px solid rgba(133, 229, 197, 0.55);
+  border-radius: 10px;
+  background: #0a5e4b;
+  color: #ecfff7;
+  padding: 0.65rem 0.8rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.feedback {
+  margin-top: 0.8rem;
+  color: #c9ffd5;
+}
+
+.list-panel h2 {
+  margin: 0;
+}
+
+.muted {
+  color: #c2f7e0;
+  margin-top: 0.65rem;
+}
+
+.order-tools {
+  margin-top: 0.75rem;
+  display: grid;
+  grid-template-columns: 1fr 200px;
+  gap: 0.5rem;
+}
+
+.order-search-input,
+.order-status-select {
+  border: 1px solid rgba(133, 229, 197, 0.45);
+  border-radius: 10px;
+  background: rgba(5, 27, 37, 0.75);
+  color: #ecfff7;
+  padding: 0.58rem 0.65rem;
+  font: inherit;
+}
+
+.order-count-line {
+  margin: 0.55rem 0 0;
+  color: #c8fce6;
+  font-size: 0.84rem;
+}
+
+.products {
+  margin-top: 0.85rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.inventory-products {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.inventory-products.single-item .product-card {
+  grid-column: 1 / -1;
+}
+
+.product-card {
+  border: 1px solid rgba(123, 225, 191, 0.28);
+  border-radius: 12px;
+  background: rgba(5, 26, 36, 0.65);
+  padding: 0.6rem;
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 0.55rem;
+  align-content: start;
+}
+
+.inventory-product-content {
+  min-width: 0;
+}
+
+.inventory-actions {
+  margin-top: 0.3rem;
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.product-card.clickable {
+  cursor: pointer;
+}
+
+.product-card img {
+  width: 90px;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid rgba(131, 236, 200, 0.35);
+}
+
+.product-card h3 {
+  margin: 0;
+  font-size: 1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.product-card h4 {
+  margin: 0;
+  font-size: 0.98rem;
+}
+
+.product-card p {
+  margin: 0.22rem 0 0;
+  color: #d2ffef;
+}
+
+.traders-grid {
+  margin-top: 0.85rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.trader-card {
+  border: 1px solid rgba(123, 225, 191, 0.28);
+  border-radius: 14px;
+  background: rgba(9, 34, 46, 0.66);
+  padding: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.trader-avatar {
+  width: 100%;
+  height: clamp(60px, 18vw, 120px);
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid rgba(133, 229, 197, 0.35);
+}
+
+.trader-avatar.placeholder {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, rgba(19, 92, 76, 0.72), rgba(15, 66, 108, 0.72));
+  color: #d8fff1;
+  font-weight: 900;
+  font-size: clamp(1rem, 4vw, 1.5rem);
+}
+
+.trader-card h3 {
+  margin: 0;
+  margin-top: 0.42rem;
+  font-size: 0.86rem;
+  line-height: 1.2;
+}
+
+.desc {
+  margin: 0.4rem 0 0;
+  color: #d4fff0;
+  font-size: 0.76rem;
+  line-height: 1.2;
+  min-height: 2.4em;
+  overflow: hidden;
+}
+
+.meta {
+  margin: 0.18rem 0 0;
+  color: #c5f9e5;
+  font-size: 0.72rem;
+}
+
+.actions {
+  margin-top: auto;
+  padding-top: 0.45rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.mini-btn {
+  margin-top: 0;
+  border: 1px solid rgba(133, 229, 197, 0.55);
+  border-radius: 10px;
+  background: #1f67a8;
+  color: #ecfff7;
+  padding: 0.4rem 0.45rem;
+  font-weight: 700;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.mini-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.mini-btn.danger {
+  background: #9a3346;
+}
+
+.mini-btn.message {
+  background: #5f58c7;
+}
+
+.checkout-btn {
+  border: 1px solid rgba(113, 221, 186, 0.6);
+  border-radius: 10px;
+  background: #0f7058;
+  color: #eafff3;
+  padding: 0.65rem 0.8rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.checkout-wrap {
+  margin-top: 0.85rem;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.checkout-title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.cart-head-actions {
+  display: flex;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.address-preview {
+  border: 1px solid rgba(126, 223, 192, 0.35);
+  border-radius: 14px;
+  background: rgba(4, 28, 39, 0.62);
+  padding: 0.8rem;
+}
+
+.address-preview p {
+  margin: 0.28rem 0 0;
+}
+
+.cart-cards {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.cart-groups {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.trader-group {
+  border: 1px solid rgba(126, 223, 192, 0.32);
+  border-radius: 14px;
+  background: rgba(5, 26, 36, 0.72);
+  padding: 0.65rem;
+}
+
+.trader-group-head {
+  padding: 0.2rem 0.3rem 0.55rem;
+}
+
+.trader-group-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #dbfff3;
+}
+
+.cart-row {
+  border-top: 1px solid rgba(126, 223, 192, 0.18);
+  padding: 0.6rem 0.3rem;
+  display: grid;
+  grid-template-columns: 26px 68px 1fr auto;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.cart-row:first-of-type {
+  border-top: 0;
+}
+
+.cart-card {
+  border: 1px solid rgba(126, 223, 192, 0.32);
+  border-radius: 14px;
+  background: rgba(5, 26, 36, 0.72);
+  padding: 0.75rem;
+  display: grid;
+  grid-template-columns: auto 84px 1fr auto;
+  gap: 0.7rem;
+  align-items: center;
+}
+
+.cart-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.cart-check.inline {
+  justify-content: center;
+}
+
+.cart-check input {
+  width: 18px;
+  height: 18px;
+}
+
+.cart-image {
+  width: 68px;
+  height: 68px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid rgba(131, 236, 200, 0.35);
+}
+
+.cart-content p {
+  margin: 0.18rem 0 0;
+  color: #d2ffef;
+}
+
+.cart-content .desc-line {
+  min-height: 1.2em;
+}
+
+.cart-content .stock-line {
+  font-size: 0.78rem;
+  color: #c0f9e2;
+}
+
+.cart-right {
+  display: grid;
+  gap: 0.3rem;
+  justify-items: end;
+}
+
+.qty-controls {
+  display: inline-grid;
+  grid-template-columns: 26px 54px 26px;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.qty-btn {
+  height: 26px;
+  padding: 0;
+  line-height: 1;
+  border-radius: 8px;
+  font-weight: 900;
+  background: #1f67a8;
+  border: 1px solid rgba(133, 229, 197, 0.55);
+}
+
+.qty-input {
+  height: 26px;
+  text-align: center;
+  padding: 0.2rem;
+  border-radius: 8px;
+}
+
+.qty-input::-webkit-outer-spin-button,
+.qty-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.qty-input[type='number'] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.product-link {
+  background: transparent;
+  border: none;
+  color: #8ce8ff;
+  text-align: left;
+  padding: 0;
+  margin: 0;
+  text-decoration: underline;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.summary-box {
+  border: 1px solid rgba(126, 223, 192, 0.35);
+  border-radius: 14px;
+  background: rgba(4, 28, 39, 0.62);
+  padding: 0.8rem;
+}
+
+.summary-box p {
+  margin: 0.28rem 0 0;
+}
+
+.summary-list {
+  margin: 0.6rem 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.3rem;
+  color: #d9fff0;
+}
+
+.orders-cards {
+  margin-top: 0.85rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.order-card {
+  border: 1px solid rgba(126, 223, 192, 0.32);
+  border-radius: 14px;
+  background: rgba(5, 26, 36, 0.72);
+  padding: 0.75rem;
+}
+
+.order-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.order-head h3 {
+  margin: 0;
+  color: #dbfff3;
+}
+
+.order-head p {
+  margin: 0.2rem 0 0;
+  color: #c3f7e3;
+  font-size: 0.8rem;
+}
+
+.order-meta {
+  margin-top: 0.6rem;
+  border: 1px solid rgba(126, 223, 192, 0.2);
+  border-radius: 10px;
+  padding: 0.55rem;
+  background: rgba(4, 28, 39, 0.62);
+  display: grid;
+  gap: 0.22rem;
+}
+
+.order-meta p {
+  margin: 0;
+  color: #d7fff1;
+  font-size: 0.82rem;
+}
+
+.order-items {
+  margin-top: 0.65rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.order-item-row {
+  border: 1px solid rgba(126, 223, 192, 0.22);
+  border-radius: 10px;
+  padding: 0.5rem;
+  display: grid;
+  grid-template-columns: 68px 1fr auto;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.order-product {
+  margin: 0;
+  color: #8ce8ff;
+  font-weight: 700;
+}
+
+.order-qty {
+  margin: 0;
+  font-weight: 800;
+  color: #e4fff4;
+  font-size: 0.86rem;
+}
+
+.order-actions {
+  margin-top: 0.55rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 9, 16, 0.7);
+  display: grid;
+  place-items: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.modal-card {
+  width: min(860px, 100%);
+  border: 1px solid rgba(123, 225, 191, 0.4);
+  border-radius: 16px;
+  background: linear-gradient(165deg, rgba(8, 35, 46, 0.96), rgba(9, 59, 71, 0.92));
+  padding: 0.9rem;
+  max-height: 88vh;
+  overflow: auto;
+}
+
+.product-edit-modal {
+  width: min(620px, 100%);
+}
+
+.product-edit-form {
+  margin-top: 0.8rem;
+}
+
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.modal-head h3 {
+  margin: 0;
+}
+
+.modal-subtext {
+  margin-top: 0.45rem;
+}
+
+.rating-stars {
+  margin-top: 0.65rem;
+  display: flex;
+  gap: 0.35rem;
+}
+
+.star-btn {
+  border: 1px solid rgba(133, 229, 197, 0.45);
+  border-radius: 10px;
+  background: rgba(5, 27, 37, 0.75);
+  color: #8ccfbb;
+  width: 42px;
+  height: 38px;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.star-btn.active {
+  color: #ffd56f;
+  border-color: rgba(255, 213, 111, 0.65);
+  background: rgba(151, 106, 24, 0.35);
+}
+
+.modal-item-list {
+  margin-top: 0.6rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.confirm-row {
+  border: 1px solid rgba(126, 223, 192, 0.2);
+  border-radius: 10px;
+  padding: 0.5rem;
+}
+
+.modal-actions {
+  margin-top: 0.8rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.modal-actions p {
+  margin: 0;
+  color: #d7fff1;
+  font-weight: 700;
+}
+
+.payment-method-block {
+  display: grid;
+  gap: 0.55rem;
+  width: 100%;
+}
+
+.payment-method-title {
+  margin: 0;
+  color: #d7fff1;
+  font-weight: 700;
+}
+
+.payment-method-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.payment-option {
+  border: 1px solid rgba(126, 223, 192, 0.35);
+  background: rgba(4, 28, 39, 0.62);
+  color: #dcfff2;
+  border-radius: 10px;
+  padding: 0.58rem 0.65rem;
+  font-weight: 800;
+  transition: border-color 0.2s ease, background-color 0.2s ease, opacity 0.2s ease;
+}
+
+.payment-option.active {
+  border-color: rgba(127, 225, 194, 0.78);
+  background: linear-gradient(145deg, rgba(22, 123, 97, 0.55), rgba(13, 94, 74, 0.76));
+}
+
+.payment-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.payment-method-label {
+  display: grid;
+  gap: 0.3rem;
+  color: #d7fff1;
+  font-weight: 700;
+}
+
+.gcash-box {
+  border: 1px solid rgba(126, 223, 192, 0.28);
+  border-radius: 12px;
+  background: rgba(4, 28, 39, 0.62);
+  padding: 0.6rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.meta-line {
+  margin: 0;
+  color: #d7fff1;
+  font-size: 0.82rem;
+}
+
+.gcash-qr-preview {
+  width: min(220px, 100%);
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  border: 1px solid rgba(126, 223, 192, 0.35);
+  border-radius: 10px;
+  background: rgba(5, 27, 37, 0.75);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid rgba(126, 223, 192, 0.26);
+  border-radius: 14px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+  background: rgba(7, 29, 40, 0.6);
+}
+
+.data-table th,
+.data-table td {
+  border-bottom: 1px solid rgba(126, 223, 192, 0.22);
+  padding: 0.55rem 0.6rem;
+  text-align: left;
+  font-size: 0.8rem;
+  vertical-align: top;
+}
+
+.data-table th {
+  color: #d9fff0;
+  background: rgba(10, 56, 71, 0.7);
+  font-weight: 800;
+}
+
+.order-item-line {
+  margin: 0;
+  color: #d2ffef;
+}
+
+.badge {
+  border-radius: 999px;
+  border: 1px solid rgba(133, 229, 197, 0.45);
+  background: rgba(30, 86, 69, 0.72);
+  color: #c8ffe8;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+@media (max-width: 560px) {
+  .order-tools {
+    grid-template-columns: 1fr;
+  }
+
+  .cart-row {
+    grid-template-columns: 22px 60px 1fr auto;
+    gap: 0.45rem;
+    align-items: center;
+  }
+
+  .cart-card {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .product-card {
+    grid-template-columns: 1fr;
+  }
+
+  .inventory-products {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cart-image {
+    width: 60px;
+    height: 60px;
+  }
+
+  .product-card img {
+    width: 100%;
+    height: 120px;
+  }
+
+  .order-item-row {
+    grid-template-columns: 60px 1fr;
+  }
+
+  .modal-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+@media (max-width: 390px) {
+  .inventory-products {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

@@ -1,0 +1,160 @@
+import { createRouter, createWebHistory } from 'vue-router';
+import Home from './Home.vue';
+import AuthView from './pages/auth/AuthView.vue';
+import AdminLayout from './pages/admin/AdminLayout.vue';
+import AdminDashboard from './pages/admin/AdminDashboard.vue';
+import AdminManageUsersPage from './pages/admin/AdminManageUsersPage.vue';
+import AdminStaffApplicationsPage from './pages/admin/AdminStaffApplicationsPage.vue';
+import AdminArchivedUsersPage from './pages/admin/AdminArchivedUsersPage.vue';
+import ClientDashboard from './pages/client/ClientDashboard.vue';
+import ClientHomePage from './pages/client/ClientHomePage.vue';
+import ClientMessagesPage from './pages/client/ClientMessagesPage.vue';
+import ClientCallPage from './pages/client/ClientCallPage.vue';
+import ClientTermsPage from './pages/client/ClientTermsPage.vue';
+import TraderDashboard from './pages/trader/TraderDashboard.vue';
+import TraderHomePage from './pages/trader/TraderHomePage.vue';
+import TraderProfilePage from './pages/trader/TraderProfilePage.vue';
+import TraderMarketplacePage from './pages/trader/TraderMarketplacePage.vue';
+import TraderBrowseProductsPage from './pages/trader/TraderBrowseProductsPage.vue';
+import TraderAddressEditorPage from './pages/trader/TraderAddressEditorPage.vue';
+import TraderInventoryPage from './pages/trader/TraderInventoryPage.vue';
+import TraderMessagesPage from './pages/trader/TraderMessagesPage.vue';
+import TraderCallPage from './pages/trader/TraderCallPage.vue';
+import TraderManageOrdersPage from './pages/trader/TraderManageOrdersPage.vue';
+import TraderVisitDetailPage from './pages/trader/TraderVisitDetailPage.vue';
+import TraderDocumentsPage from './pages/trader/TraderDocumentsPage.vue';
+import TraderOperationsPage from './pages/trader/TraderOperationsPage.vue';
+import AdminPaperApprovalsPage from './pages/admin/AdminPaperApprovalsPage.vue';
+import AdminMessagesPage from './pages/admin/AdminMessagesPage.vue';
+import AdminCallPage from './pages/admin/AdminCallPage.vue';
+import { getUser, isLoggedIn } from './services/session';
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    { path: '/', name: 'home', component: Home },
+    { path: '/auth', name: 'auth', component: AuthView },
+    {
+      path: '/traders/:id',
+      name: 'trader-visit-detail',
+      component: TraderVisitDetailPage,
+      meta: { auth: true, roles: ['client', 'trader'] },
+    },
+    {
+      path: '/admin',
+      component: AdminLayout,
+      meta: { auth: true, role: 'admin' },
+      children: [
+        { path: '', redirect: { name: 'admin-dashboard' } },
+        { path: 'dashboard', name: 'admin-dashboard', component: AdminDashboard },
+        { path: 'manage-users', name: 'admin-manage-users', component: AdminManageUsersPage },
+        {
+          path: 'manage-users/:id',
+          name: 'admin-manage-user-details',
+          component: AdminManageUsersPage,
+        },
+        {
+          path: 'staff-applications',
+          name: 'admin-staff-applications',
+          component: AdminStaffApplicationsPage,
+        },
+        {
+          path: 'archived-users',
+          name: 'admin-archived-users',
+          component: AdminArchivedUsersPage,
+        },
+        {
+          path: 'paper-approvals',
+          name: 'admin-paper-approvals',
+          component: AdminPaperApprovalsPage,
+        },
+        { path: 'messages', name: 'admin-messages', component: AdminMessagesPage },
+        { path: 'call', name: 'admin-call', component: AdminCallPage },
+      ],
+    },
+    {
+      path: '/client',
+      component: ClientDashboard,
+      meta: { auth: true, role: 'client' },
+      children: [
+        { path: '', redirect: { name: 'client-dashboard' } },
+        { path: 'dashboard', name: 'client-dashboard', component: ClientHomePage },
+        { path: 'terms', name: 'client-terms', component: ClientTermsPage },
+        { path: 'messages', name: 'client-messages', component: ClientMessagesPage },
+        { path: 'call', name: 'client-call', component: ClientCallPage },
+      ],
+    },
+    {
+      path: '/trader',
+      component: TraderDashboard,
+      meta: { auth: true, role: 'trader' },
+      children: [
+        { path: '', redirect: { name: 'trader-dashboard' } },
+        { path: 'dashboard', name: 'trader-dashboard', component: TraderHomePage },
+        { path: 'profile', name: 'trader-profile', component: TraderProfilePage },
+        { path: 'marketplace', name: 'trader-marketplace', component: TraderMarketplacePage },
+        { path: 'manage-products', name: 'trader-manage-products', component: TraderMarketplacePage },
+        { path: 'inventory', name: 'trader-inventory', component: TraderInventoryPage },
+        { path: 'manage-orders', name: 'trader-manage-orders', component: TraderManageOrdersPage },
+        { path: 'documents', name: 'trader-documents', component: TraderDocumentsPage },
+        { path: 'operations', name: 'trader-operations', component: TraderOperationsPage },
+        { path: 'messages', name: 'trader-messages', component: TraderMessagesPage },
+        { path: 'call', name: 'trader-call', component: TraderCallPage },
+        { path: 'address-editor', name: 'trader-address-editor', component: TraderAddressEditorPage },
+        {
+          path: 'browse-products',
+          name: 'trader-browse-products',
+          component: TraderBrowseProductsPage,
+        },
+      ],
+    },
+  ],
+});
+
+function isTraderUser(user) {
+  return Boolean(user && (user.role === 'trader' || user.status === 'trader'));
+}
+
+function isAdminUser(user) {
+  return Boolean(user && user.role === 'admin');
+}
+
+router.beforeEach((to) => {
+  if (to.name === 'home' && isLoggedIn()) {
+    const user = getUser();
+    if (isAdminUser(user)) return { name: 'admin-dashboard' };
+    if (isTraderUser(user)) return { name: 'trader-dashboard' };
+    return { name: 'client-dashboard' };
+  }
+
+  if (!to.meta.auth) {
+    return true;
+  }
+
+  if (!isLoggedIn()) {
+    return { name: 'auth' };
+  }
+
+  const user = getUser();
+  if (!user) {
+    return { name: 'auth' };
+  }
+
+  const allowedRoles = Array.isArray(to.meta.roles)
+    ? to.meta.roles
+    : to.meta.role
+      ? [to.meta.role]
+      : [];
+
+  const effectiveRole = isTraderUser(user) ? 'trader' : user.role;
+
+  if (allowedRoles.length && !allowedRoles.includes(effectiveRole)) {
+    if (isAdminUser(user)) return { name: 'admin-dashboard' };
+    if (isTraderUser(user)) return { name: 'trader-dashboard' };
+    return { name: 'client-dashboard' };
+  }
+
+  return true;
+});
+
+export default router;
