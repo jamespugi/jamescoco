@@ -2,12 +2,9 @@ import 'dotenv/config';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import mysql from 'mysql2/promise';
+import { createMysqlConfig } from './databaseConfig.js';
 
-const DB_HOST = process.env.DB_HOST || 'localhost';
-const DB_PORT = Number(process.env.DB_PORT) || 3306;
-const DB_USER = process.env.DB_USER || 'root';
-const DB_PASSWORD = process.env.DB_PASSWORD || '';
-const DB_NAME = process.env.DB_NAME || 'new_cocolytics';
+const { baseConfig, database: DB_NAME } = createMysqlConfig();
 const IMPORT_SOURCE_DB_NAME = process.env.IMPORT_SOURCE_DB_NAME || 'new_cocolytics';
 
 function escapeRegExp(value) {
@@ -48,20 +45,32 @@ async function main() {
 
   const sql = await fs.readFile(sqlPath, 'utf8');
 
-  const connection = await mysql.createConnection({
-    host: DB_HOST,
-    port: DB_PORT,
-    user: DB_USER,
-    password: DB_PASSWORD,
-    multipleStatements: true,
-  });
-
+  let connection;
   try {
-    if (process.env.FORCE_IMPORT === 'true') {
-      await connection.query(`DROP DATABASE IF EXISTS \`${DB_NAME}\`;`);
+    if (process.env.NODE_ENV === 'production' && process.env.FORCE_IMPORT === 'true') {
+      throw new Error('FORCE_IMPORT is disabled in production to protect existing database contents.');
     }
-    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
-    await connection.changeUser({ database: DB_NAME });
+
+    if (process.env.FORCE_IMPORT === 'true') {
+      connection = await mysql.createConnection(baseConfig);
+      await connection.query(`DROP DATABASE IF EXISTS \`${DB_NAME}\`;`);
+      await connection.query(`CREATE DATABASE \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
+      await connection.changeUser({ database: DB_NAME });
+    } else if (process.env.NODE_ENV !== 'production') {
+      connection = await mysql.createConnection(baseConfig);
+      await connection.query(`CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
+      await connection.changeUser({ database: DB_NAME });
+    } else {
+      connection = await mysql.createConnection({ ...baseConfig, database: DB_NAME });
+    }
+
+    const [existingTables] = await connection.query(
+      'SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = ?',
+      [DB_NAME]
+    );
+    if (Number(existingTables[0].count) > 0) {
+      throw new Error(`Refusing to import into non-empty database ${DB_NAME}.`);
+    }
 
     const databaseSql = selectDatabaseSection(sql)
       .replace(/CREATE\s+DATABASE\s+IF\s+NOT\s+EXISTS\s+`[^`]+`[^;]*;/gi, '')
@@ -74,7 +83,9 @@ async function main() {
     process.exit(0);
   } catch (error) {
     console.error('Import failed:', error.message);
-    try { await connection.end(); } catch (e) {}
+    if (connection) {
+      try { await connection.end(); } catch {}
+    }
     process.exit(1);
   }
 }

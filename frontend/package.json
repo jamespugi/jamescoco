@@ -6,14 +6,21 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "android:sync": "npm run build && node -e \"require('node:fs').rmSync('dist/downloads/cocolytics-android.apk', { force: true })\" && cap sync android",
+    "android:open": "cap open android"
   },
   "dependencies": {
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/core": "^8.6.2",
+    "@ionic/vue": "^9.0.13",
+    "@zxing/browser": "^0.2.1",
     "exceljs": "^4.4.0",
     "vue": "^3.4.15",
     "vue-router": "^5.0.4"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.6.2",
     "@vitejs/plugin-vue": "^5.0.3",
     "vite": "^5.1.0",
     "vite-plugin-pwa": "^1.2.0"

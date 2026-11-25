@@ -10,26 +10,36 @@ import {
   findLatestActiveOtpCode,
   findOtpCodeById,
   findUserByEmail,
+  findUserByContact,
   findUserByGoogleId,
   findUserById,
   findUserForLogin,
   markOtpCodeUsedById,
   markOtpCodeVerifiedById,
   markUserEmailVerifiedById,
+  markUserPhoneVerifiedById,
   linkGoogleIdToUser,
   sanitizeUser,
   updateUserPasswordHashById,
 } from '../models/userModel.js';
 import { sendOtpEmail } from '../services/emailService.js';
-import { buildOtpExpiry, generateAlphaNumericOtp, isOtpExpired } from '../services/otpService.js';
+import { sendOtpSms } from '../services/smsService.js';
+import { getContactChannel, isValidEmail, normalizeEmail, normalizePhoneNumber } from '../services/contactService.js';
+import { buildOtpExpiry, generateAlphaNumericOtp, generateNumericOtp, isOtpExpired } from '../services/otpService.js';
+import { respondToAuthFailure } from '../utils/authFailure.js';
+import { getJwtSecret } from '../utils/jwtSecret.js';
 
 const OTP_EXPIRY_MINUTES = 10;
-const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret';
+const JWT_SECRET = getJwtSecret();
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const googleClient = new OAuth2Client();
 
 function passwordIsStrong(value) {
   return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(String(value || ''));
+}
+
+function normalizeOtp(value) {
+  return String(value || '').trim().replace(/\s+/g, '').toUpperCase();
 }
 
 function createPasswordResetToken(payload) {
@@ -40,53 +50,76 @@ function verifyPasswordResetToken(token) {
   return jwt.verify(token, JWT_SECRET);
 }
 
-async function issueOtpForUser({ user, purpose }) {
-  const otpCode = generateAlphaNumericOtp();
+async function issueOtpForUser({ user, purpose, channel = user.phone && !user.email ? 'phone' : 'email' }) {
+  const recipient = channel === 'phone' ? user.phone : user.email;
+  const otpCode = channel === 'phone' ? generateNumericOtp() : generateAlphaNumericOtp();
   const otpHash = await bcrypt.hash(otpCode, 10);
   const expiresAt = buildOtpExpiry(OTP_EXPIRY_MINUTES);
 
   await createOtpCode({
     userId: user.id,
-    email: user.email,
+    recipient,
+    channel,
     purpose,
     otpHash,
     expiresAt,
   });
 
-  const emailResult = await sendOtpEmail({
-    to: user.email,
-    purpose,
-    otp: otpCode,
-    expiresMinutes: OTP_EXPIRY_MINUTES,
-  });
+  const deliveryResult = channel === 'phone'
+    ? await sendOtpSms({
+        to: recipient,
+        purpose,
+        otp: otpCode,
+        expiresMinutes: OTP_EXPIRY_MINUTES,
+      })
+    : await sendOtpEmail({
+        to: recipient,
+        purpose,
+        otp: otpCode,
+        expiresMinutes: OTP_EXPIRY_MINUTES,
+      });
 
   return {
-    otpCode,
-    emailSent: !!emailResult?.sent,
-    emailError: emailResult?.reason || '',
+    channel,
+    sent: !!deliveryResult?.sent,
+    deliveryError: deliveryResult?.reason || '',
   };
 }
 
 function otpDeliveryResponse(otpResult, message) {
-  if (otpResult.emailSent) {
-    return { status: 200, body: { message } };
+  if (otpResult.sent) {
+    return { status: 200, body: { message, channel: otpResult.channel } };
   }
 
   return {
     status: 503,
     body: {
-      error: 'The verification email could not be sent. Please try again shortly.',
-      code: 'EMAIL_DELIVERY_FAILED',
-      emailDeliveryError: otpResult.emailError,
+      error: `The verification code could not be sent by ${otpResult.channel === 'phone' ? 'SMS' : 'email'}. Please try again shortly.`,
+      code: otpResult.channel === 'phone' ? 'SMS_DELIVERY_FAILED' : 'EMAIL_DELIVERY_FAILED',
+      channel: otpResult.channel,
+      deliveryError: otpResult.deliveryError,
     },
   };
 }
 
 export async function register(req, res) {
-  const { fullName, email, password, staffReason } = req.body;
+  const { fullName, password, staffReason } = req.body;
+  const email = String(req.body.email || '').trim();
+  const phone = normalizePhoneNumber(req.body.phone);
+  const hasEmail = Boolean(email);
+  const hasPhone = Boolean(req.body.phone);
+  const channel = hasPhone ? 'phone' : 'email';
 
-  if (!fullName || !email || !password || !String(staffReason || '').trim()) {
-    return res.status(400).json({ error: 'fullName, email, password, and staffReason are required.' });
+  if (!fullName || !password || !String(staffReason || '').trim() || hasEmail === hasPhone) {
+    return res.status(400).json({ error: 'fullName, exactly one of email or phone, password, and staffReason are required.' });
+  }
+
+  if (hasEmail && !isValidEmail(email)) {
+    return res.status(400).json({ error: 'Enter a valid email address.' });
+  }
+
+  if (hasPhone && !phone) {
+    return res.status(400).json({ error: 'Enter a valid phone number in international format, such as +639171234567.' });
   }
 
   if (!passwordIsStrong(password)) {
@@ -95,42 +128,60 @@ export async function register(req, res) {
 
   try {
     const passwordHash = await bcrypt.hash(password, 10);
-    await createClientUser(fullName, email, passwordHash, staffReason);
-    const createdUser = await findUserByEmail(email);
+    await createClientUser({
+      fullName,
+      email: hasEmail ? normalizeEmail(email) : null,
+      phone: hasPhone ? phone : null,
+      passwordHash,
+      staffReason,
+    });
+    const contact = hasPhone ? phone : normalizeEmail(email);
+    const createdUser = await findUserByContact(contact, channel);
 
     if (!createdUser) {
       return res.status(500).json({ error: 'Could not register user.' });
     }
 
-    const otpResult = await issueOtpForUser({ user: createdUser, purpose: 'verify_email' });
+    const otpResult = await issueOtpForUser({ user: createdUser, purpose: 'verify_email', channel });
     const delivery = otpDeliveryResponse(
       otpResult,
-      'Registration successful. Verify your email with the OTP sent to your inbox.'
+      `Registration successful. Verify your ${channel === 'phone' ? 'phone number with the SMS code' : 'email with the code sent to your inbox'}.`
     );
 
     return res.status(delivery.status === 200 ? 201 : delivery.status).json({
       ...delivery.body,
       status: 'pending_client',
-      email: createdUser.email,
+      email: createdUser.email || '',
+      phone: createdUser.phone || '',
+      contact,
     });
   } catch (error) {
     if (error && error.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ error: 'Email already exists.' });
+      return res.status(409).json({ error: 'Email or phone number already exists.' });
     }
 
-    return res.status(500).json({ error: 'Could not register user.' });
+    return respondToAuthFailure(res, error, 'Registration', 'Could not register user.');
   }
 }
 
 export async function login(req, res) {
-  const { email, password } = req.body;
+  const identifier = String(req.body.identifier || req.body.email || '').trim();
+  const { password } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).json({ error: 'email and password are required.' });
+  if (!identifier || !password) {
+    return res.status(400).json({ error: 'email or phone number and password are required.' });
   }
 
   try {
-    const user = await findUserForLogin(email);
+    const channel = getContactChannel(identifier);
+    const contact = channel === 'phone'
+      ? normalizePhoneNumber(identifier)
+      : normalizeEmail(identifier);
+    if (!contact || (channel === 'email' && !isValidEmail(contact))) {
+      return res.status(400).json({ error: channel === 'phone' ? 'Enter a valid phone number in international format.' : 'Enter a valid email address.' });
+    }
+
+    const user = await findUserForLogin(contact);
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials.' });
@@ -148,11 +199,15 @@ export async function login(req, res) {
       });
     }
 
-    if (!user.is_email_verified) {
+    const isVerified = channel === 'phone' ? user.is_phone_verified : user.is_email_verified;
+    if (!isVerified) {
       return res.status(403).json({
-        error: 'Email is not verified. Please verify your email first.',
-        code: 'EMAIL_NOT_VERIFIED',
+        error: `${channel === 'phone' ? 'Phone number' : 'Email'} is not verified. Please verify it first.`,
+        code: channel === 'phone' ? 'PHONE_NOT_VERIFIED' : 'EMAIL_NOT_VERIFIED',
         email: user.email,
+        phone: user.phone,
+        contact,
+        channel,
       });
     }
 
@@ -160,8 +215,8 @@ export async function login(req, res) {
       token: createToken(user),
       user: sanitizeUser(user),
     });
-  } catch {
-    return res.status(500).json({ error: 'Could not log in.' });
+  } catch (error) {
+    return respondToAuthFailure(res, error, 'Login', 'Could not log in.');
   }
 }
 
@@ -232,50 +287,57 @@ export async function me(req, res) {
     }
 
     return res.status(200).json({ user: sanitizeUser(user) });
-  } catch {
-    return res.status(500).json({ error: 'Could not fetch user profile.' });
+  } catch (error) {
+    return respondToAuthFailure(res, error, 'Fetching user profile', 'Could not fetch user profile.');
   }
 }
 
 export async function resendVerifyOtp(req, res) {
-  const { email } = req.body;
+  const contact = String(req.body.contact || req.body.email || req.body.phone || '').trim();
+  const channel = req.body.channel || getContactChannel(contact);
 
-  if (!email) {
-    return res.status(400).json({ error: 'email is required.' });
+  if (!contact) {
+    return res.status(400).json({ error: 'email or phone number is required.' });
   }
 
   try {
-    const user = await findUserByEmail(email);
+    const user = await findUserByContact(contact, channel);
     if (!user) {
-      return res.status(404).json({ error: 'User with this email was not found.' });
+      return res.status(404).json({ error: 'No account was found for this contact.' });
     }
 
-    if (user.is_email_verified) {
-      return res.status(200).json({ message: 'Email is already verified.' });
+    const isVerified = channel === 'phone' ? user.is_phone_verified : user.is_email_verified;
+    if (isVerified) {
+      return res.status(200).json({ message: `${channel === 'phone' ? 'Phone number' : 'Email'} is already verified.` });
     }
 
-    const otpResult = await issueOtpForUser({ user, purpose: 'verify_email' });
-    const delivery = otpDeliveryResponse(otpResult, 'Verification OTP sent to your email.');
+    const otpResult = await issueOtpForUser({ user, purpose: 'verify_email', channel });
+    const delivery = otpDeliveryResponse(
+      otpResult,
+      `Verification code sent by ${channel === 'phone' ? 'SMS' : 'email'}.`
+    );
     return res.status(delivery.status).json(delivery.body);
-  } catch {
-    return res.status(500).json({ error: 'Could not send verification OTP.' });
+  } catch (error) {
+    return respondToAuthFailure(res, error, 'Sending verification code', 'Could not send verification code.');
   }
 }
 
 export async function verifyEmailOtp(req, res) {
-  const { email, otp } = req.body;
+  const contact = String(req.body.contact || req.body.email || req.body.phone || '').trim();
+  const channel = req.body.channel || getContactChannel(contact);
+  const { otp } = req.body;
 
-  if (!email || !otp) {
-    return res.status(400).json({ error: 'email and otp are required.' });
+  if (!contact || !otp) {
+    return res.status(400).json({ error: 'contact and otp are required.' });
   }
 
   try {
-    const user = await findUserByEmail(email);
+    const user = await findUserByContact(contact, channel);
     if (!user) {
-      return res.status(404).json({ error: 'User with this email was not found.' });
+      return res.status(404).json({ error: 'No account was found for this contact.' });
     }
 
-    const otpRecord = await findLatestActiveOtpCode(email, 'verify_email');
+    const otpRecord = await findLatestActiveOtpCode(contact, 'verify_email', channel);
     if (!otpRecord) {
       return res.status(400).json({ error: 'No active verification OTP found. Please resend OTP.' });
     }
@@ -285,59 +347,66 @@ export async function verifyEmailOtp(req, res) {
       return res.status(400).json({ error: 'OTP has expired. Please resend OTP.' });
     }
 
-    const otpMatches = await bcrypt.compare(String(otp).trim().toUpperCase(), otpRecord.otp_hash);
+    const otpMatches = await bcrypt.compare(normalizeOtp(otp), otpRecord.otp_hash);
     if (!otpMatches) {
       return res.status(400).json({ error: 'Invalid OTP.' });
     }
 
     await markOtpCodeVerifiedById(otpRecord.id);
     await markOtpCodeUsedById(otpRecord.id);
-    await markUserEmailVerifiedById(user.id);
+    if (channel === 'phone') {
+      await markUserPhoneVerifiedById(user.id);
+    } else {
+      await markUserEmailVerifiedById(user.id);
+    }
 
     const verifiedUser = await findUserById(user.id);
     return res.status(200).json({
-      message: 'Email verified successfully.',
+      message: `${channel === 'phone' ? 'Phone number' : 'Email'} verified successfully.`,
       token: createToken(verifiedUser),
       user: sanitizeUser(verifiedUser),
     });
-  } catch {
-    return res.status(500).json({ error: 'Could not verify OTP.' });
+  } catch (error) {
+    return respondToAuthFailure(res, error, 'Verifying OTP', 'Could not verify OTP.');
   }
 }
 
 export async function forgotPasswordRequestOtp(req, res) {
-  const { email } = req.body;
+  const contact = String(req.body.contact || req.body.email || req.body.phone || '').trim();
+  const channel = req.body.channel || getContactChannel(contact);
 
-  if (!email) {
-    return res.status(400).json({ error: 'email is required.' });
+  if (!contact) {
+    return res.status(400).json({ error: 'email or phone number is required.' });
   }
 
   try {
-    const user = await findUserByEmail(email);
+    const user = await findUserByContact(contact, channel);
 
     if (user) {
-      const otpResult = await issueOtpForUser({ user, purpose: 'reset_password' });
-      const delivery = otpDeliveryResponse(otpResult, 'If your email exists, an OTP has been sent.');
-      if (delivery.status !== 200 || !otpResult.emailSent) {
+      const otpResult = await issueOtpForUser({ user, purpose: 'reset_password', channel });
+      const delivery = otpDeliveryResponse(otpResult, 'If your account exists, a reset code has been sent.');
+      if (delivery.status !== 200 || !otpResult.sent) {
         return res.status(delivery.status).json(delivery.body);
       }
     }
 
-    return res.status(200).json({ message: 'If your email exists, an OTP has been sent.' });
-  } catch {
-    return res.status(500).json({ error: 'Could not process forgot password request.' });
+    return res.status(200).json({ message: 'If your account exists, a reset code has been sent.' });
+  } catch (error) {
+    return respondToAuthFailure(res, error, 'Requesting password reset', 'Could not process forgot password request.');
   }
 }
 
 export async function forgotPasswordVerifyOtp(req, res) {
-  const { email, otp } = req.body;
+  const contact = String(req.body.contact || req.body.email || req.body.phone || '').trim();
+  const channel = req.body.channel || getContactChannel(contact);
+  const { otp } = req.body;
 
-  if (!email || !otp) {
-    return res.status(400).json({ error: 'email and otp are required.' });
+  if (!contact || !otp) {
+    return res.status(400).json({ error: 'contact and otp are required.' });
   }
 
   try {
-    const otpRecord = await findLatestActiveOtpCode(email, 'reset_password');
+    const otpRecord = await findLatestActiveOtpCode(contact, 'reset_password', channel);
     if (!otpRecord) {
       return res.status(400).json({ error: 'No active reset OTP found. Please request a new OTP.' });
     }
@@ -347,7 +416,7 @@ export async function forgotPasswordVerifyOtp(req, res) {
       return res.status(400).json({ error: 'OTP has expired. Please request a new OTP.' });
     }
 
-    const otpMatches = await bcrypt.compare(String(otp).trim().toUpperCase(), otpRecord.otp_hash);
+    const otpMatches = await bcrypt.compare(normalizeOtp(otp), otpRecord.otp_hash);
     if (!otpMatches) {
       return res.status(400).json({ error: 'Invalid OTP.' });
     }
@@ -355,7 +424,8 @@ export async function forgotPasswordVerifyOtp(req, res) {
     await markOtpCodeVerifiedById(otpRecord.id);
     const resetToken = createPasswordResetToken({
       otpId: otpRecord.id,
-      email: otpRecord.email,
+      recipient: otpRecord.recipient,
+      channel: otpRecord.channel,
       purpose: 'reset_password',
     });
 
@@ -363,8 +433,8 @@ export async function forgotPasswordVerifyOtp(req, res) {
       message: 'OTP verified successfully.',
       resetToken,
     });
-  } catch {
-    return res.status(500).json({ error: 'Could not verify reset OTP.' });
+  } catch (error) {
+    return respondToAuthFailure(res, error, 'Verifying password reset OTP', 'Could not verify reset OTP.');
   }
 }
 
@@ -390,7 +460,12 @@ export async function forgotPasswordReset(req, res) {
     }
 
     const otpRecord = await findOtpCodeById(payload.otpId);
-    if (!otpRecord || otpRecord.email !== payload.email || otpRecord.purpose !== 'reset_password') {
+    if (
+      !otpRecord ||
+      otpRecord.recipient !== payload.recipient ||
+      otpRecord.channel !== payload.channel ||
+      otpRecord.purpose !== 'reset_password'
+    ) {
       return res.status(400).json({ error: 'Invalid reset token.' });
     }
 
@@ -408,7 +483,7 @@ export async function forgotPasswordReset(req, res) {
     await markOtpCodeUsedById(otpRecord.id);
 
     return res.status(200).json({ message: 'Password reset successful. You can now log in.' });
-  } catch {
-    return res.status(400).json({ error: 'Invalid or expired reset token.' });
+  } catch (error) {
+    return respondToAuthFailure(res, error, 'Resetting password', 'Invalid or expired reset token.', 400);
   }
 }

@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import multer from 'multer';
+import { getUploadDirectory } from '../utils/uploadPaths.js';
 import {
   createMessageBetweenTraders,
   listConversationPartnerIds,
@@ -23,9 +23,7 @@ import {
 } from '../realtime/messageStream.js';
 import { findUserById, updateUserLastSeenById } from '../models/userModel.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const messengerUploadsDir = path.resolve(__dirname, '../../../frontend/public/uploads/messenger');
+const messengerUploadsDir = getUploadDirectory('messenger');
 const PRESENCE_RECENT_WINDOW_MS = 90 * 1000;
 
 const messageImageStorage = multer.diskStorage({

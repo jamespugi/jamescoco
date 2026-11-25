@@ -1,42 +1,27 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { fetchProductionBatches, fetchTraderOperationsReport, fetchTraderProducts, fetchTraderSalesOrders } from '../../services/api';
 
 const activeFilter = ref('scanner');
 const loading = ref(false);
 const exporting = ref(false);
 const feedback = ref('');
+const videoRef = ref(null);
+const scannerActive = ref(false);
+const scannerFeedback = ref('');
+const scannerFeedbackType = ref('info');
+const scannedLumber = ref(null);
 const salesOrders = ref([]);
 const productionBatches = ref([]);
 const traderProducts = ref([]);
 const operationsReport = ref({ stock: {}, production: {}, prices: [], reservations: [] });
 const selectedReportMonth = ref(new Date().toISOString().slice(0, 7));
 
+let scannerReader = null;
+let scannerControls = null;
+let scannerSession = 0;
+
 const completedStatuses = new Set(['completed', 'delivered', 'fulfilled']);
-
-const presentationProducts = [
-  { id: 'demo-coconut', productName: 'Cocolumber', stockQuantity: 120, reservedQuantity: 18, lowStockThreshold: 50 },
-];
-
-const presentationOrders = [
-  { id: 'demo-order-1', status: 'completed', createdAt: '2026-05-12T09:00:00', items: [{ productName: 'Cocolumber', size: 'large', quantity: 18, unitPrice: 45, lineTotal: 810 }] },
-  { id: 'demo-order-2', status: 'completed', createdAt: '2026-06-15T09:00:00', items: [{ productName: 'Cocolumber', size: 'large', quantity: 22, unitPrice: 48, lineTotal: 1056 }] },
-  { id: 'demo-order-3', status: 'completed', createdAt: '2026-07-18T09:00:00', items: [{ productName: 'Cocolumber', size: 'large', quantity: 20, unitPrice: 46, lineTotal: 920 }] },
-  { id: 'demo-order-4', status: 'completed', createdAt: '2026-08-10T09:00:00', items: [{ productName: 'Cocolumber', size: 'large', quantity: 25, unitPrice: 50, lineTotal: 1250 }] },
-];
-
-const presentationPrices = [
-  { productName: 'Cocolumber', effectiveMonth: '2026-01-01', unitPrice: 45, previousPrice: null, trend: 'new' },
-  { productName: 'Cocolumber', effectiveMonth: '2026-02-01', unitPrice: 48, previousPrice: 45, trend: 'increased' },
-  { productName: 'Cocolumber', effectiveMonth: '2026-03-01', unitPrice: 46, previousPrice: 48, trend: 'decreased' },
-  { productName: 'Cocolumber', effectiveMonth: '2026-04-01', unitPrice: 46, previousPrice: 46, trend: 'unchanged' },
-  { productName: 'Cocolumber', effectiveMonth: '2026-05-01', unitPrice: 50, previousPrice: 46, trend: 'increased' },
-];
-
-const presentationProductionBatches = [
-  { id: 'demo-batch-1', tree_name: 'Cocolumber Tree A', total_units: 80, cut_units: 50, status: 'partially_cut' },
-  { id: 'demo-batch-2', tree_name: 'Cocolumber Tree B', total_units: 60, cut_units: 35, status: 'partially_cut' },
-];
 
 function orderRevenue(order) {
   return (order.items || []).reduce((sum, item) => {
@@ -450,6 +435,111 @@ const filterLabel = computed(() => {
   return 'Reports';
 });
 
+function stopScanner() {
+  const wasActive = scannerActive.value;
+  scannerSession += 1;
+  scannerControls?.stop();
+  scannerControls = null;
+  scannerReader?.reset();
+  scannerReader = null;
+  scannerActive.value = false;
+  if (wasActive && scannerFeedbackType.value === 'info') {
+    scannerFeedback.value = 'Camera scanner stopped.';
+  }
+}
+
+function decodeLumberPayload(rawValue) {
+  let payload;
+  try {
+    payload = JSON.parse(rawValue);
+  } catch {
+    throw new Error('The scanned code is not valid JSON. Include length, width, thickness, and quantity.');
+  }
+
+  const length = Number(payload?.length);
+  const width = Number(payload?.width);
+  const thickness = Number(payload?.thickness);
+  const quantity = Number(payload?.quantity);
+  if (
+    !Number.isFinite(length) || length <= 0
+    || !Number.isFinite(width) || width <= 0
+    || !Number.isFinite(thickness) || thickness <= 0
+    || !Number.isInteger(quantity) || quantity <= 0
+  ) {
+    throw new Error('The scanned code must contain positive length, width, thickness, and whole-number quantity values.');
+  }
+
+  const boardFeetEach = (length * width * thickness) / 144;
+  return {
+    productName: String(payload.productName || payload.product || 'Cocolumber'),
+    length,
+    width,
+    thickness,
+    quantity,
+    boardFeetEach,
+    totalBoardFeet: boardFeetEach * quantity,
+  };
+}
+
+async function startScanner() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    scannerFeedbackType.value = 'error';
+    scannerFeedback.value = 'Camera access is unavailable in this browser. Use a secure connection (HTTPS or localhost) and a supported browser.';
+    return;
+  }
+  if (!videoRef.value) return;
+
+  stopScanner();
+  scannedLumber.value = null;
+  scannerFeedbackType.value = 'info';
+  scannerFeedback.value = 'Opening the rear camera...';
+  scannerActive.value = true;
+
+  const session = scannerSession;
+
+  try {
+    const { BrowserMultiFormatReader } = await import('@zxing/browser');
+    if (session !== scannerSession) return;
+
+    const reader = new BrowserMultiFormatReader();
+    scannerReader = reader;
+    const controls = await reader.decodeFromConstraints(
+      { audio: false, video: { facingMode: { ideal: 'environment' } } },
+      videoRef.value,
+      (result) => {
+        if (!result || session !== scannerSession || scannedLumber.value) return;
+        try {
+          scannedLumber.value = decodeLumberPayload(result.getText());
+          scannerFeedbackType.value = 'success';
+          scannerFeedback.value = 'Cocolumber dimensions scanned and board feet calculated.';
+        } catch (error) {
+          scannerFeedbackType.value = 'error';
+          scannerFeedback.value = error.message;
+        }
+        stopScanner();
+      }
+    );
+
+    if (session !== scannerSession) {
+      controls.stop();
+      reader.reset();
+      return;
+    }
+    scannerControls = controls;
+  } catch (error) {
+    if (session !== scannerSession) return;
+    stopScanner();
+    scannerFeedbackType.value = 'error';
+    scannerFeedback.value = error.message || 'Could not start the camera scanner. Check camera permissions and try again.';
+  }
+}
+
+watch(activeFilter, (filter) => {
+  if (filter !== 'scanner') stopScanner();
+});
+
+onBeforeUnmount(stopScanner);
+
 function formatDate(value) {
   return new Date(value).toLocaleString();
 }
@@ -852,28 +942,6 @@ async function loadOperationsData() {
     operationsReport.value = reportData || operationsReport.value;
     productionBatches.value = productionData.batches || [];
     traderProducts.value = productsData.products || [];
-
-    if (!traderProducts.value.length) {
-      traderProducts.value = presentationProducts;
-    }
-    if (!salesOrders.value.length) {
-      salesOrders.value = presentationOrders;
-    }
-    if (!operationsReport.value.prices?.length) {
-      operationsReport.value = {
-        ...operationsReport.value,
-        prices: presentationPrices,
-      };
-    }
-    if (!productionBatches.value.length) {
-      productionBatches.value = presentationProductionBatches;
-    }
-    if (!operationsReport.value.stock?.available_stock && !operationsReport.value.stock?.total_stock) {
-      operationsReport.value = {
-        ...operationsReport.value,
-        stock: { total_stock: 265, reserved_stock: 38, available_stock: 227, low_stock_products: 0 },
-      };
-    }
   } catch (error) {
     feedback.value = error.message || 'Could not load operations data.';
   } finally {
@@ -912,6 +980,42 @@ onMounted(loadOperationsData);
       </div>
       <p v-if="feedback" class="feedback">{{ feedback }}</p>
       <p v-if="loading" class="muted">Loading operations data...</p>
+
+      <section v-if="!loading && activeFilter === 'scanner'" class="camera-scanner">
+        <div class="scanner-heading">
+          <div>
+            <h3>Cocolumber Camera Scanner</h3>
+            <p class="table-hint">Scan a QR code or barcode with dimensions in inches and quantity. Board feet = (length × width × thickness × quantity) ÷ 144.</p>
+          </div>
+          <button v-if="!scannerActive" type="button" class="scan-btn" @click="startScanner">Open camera scanner</button>
+          <button v-else type="button" class="scan-btn secondary" @click="stopScanner">Stop camera</button>
+        </div>
+        <p class="payload-hint">Code format: {"productName":"Cocolumber","length":96,"width":4,"thickness":2,"quantity":10}</p>
+        <p v-if="scannerFeedback" :class="['scanner-feedback', scannerFeedbackType]">{{ scannerFeedback }}</p>
+        <video v-show="scannerActive" ref="videoRef" class="scanner-video" autoplay muted playsinline aria-label="Camera preview for scanning lumber labels"></video>
+        <article v-if="scannedLumber" class="scan-result" aria-live="polite">
+          <div>
+            <span class="result-label">Scanned product</span>
+            <strong>{{ scannedLumber.productName }}</strong>
+          </div>
+          <div>
+            <span class="result-label">Dimensions (L × W × T)</span>
+            <strong>{{ scannedLumber.length }} × {{ scannedLumber.width }} × {{ scannedLumber.thickness }} in</strong>
+          </div>
+          <div>
+            <span class="result-label">Quantity</span>
+            <strong>{{ scannedLumber.quantity }} pieces</strong>
+          </div>
+          <div>
+            <span class="result-label">Board feet per piece</span>
+            <strong>{{ scannedLumber.boardFeetEach.toFixed(2) }} BF</strong>
+          </div>
+          <div class="total-board-feet">
+            <span class="result-label">Total board feet</span>
+            <strong>{{ scannedLumber.totalBoardFeet.toFixed(2) }} BF</strong>
+          </div>
+        </article>
+      </section>
 
       <div v-if="!loading && activeFilter === 'scanner'" class="cards-grid">
         <article class="metric-card teal">
@@ -1272,6 +1376,103 @@ onMounted(loadOperationsData);
 .feedback {
   margin: 0.7rem 0 0;
   color: #a14f4f;
+}
+
+.camera-scanner {
+  margin-top: 0.9rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.scanner-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.scanner-heading h3 {
+  margin: 0;
+}
+
+.camera-scanner .table-hint {
+  margin: 0.35rem 0 0;
+  color: var(--muted-ink);
+  font-size: 0.84rem;
+}
+
+.scan-btn {
+  flex: 0 0 auto;
+  border: 1px solid var(--sage);
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  background: var(--sage);
+  color: #ffffff;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.scan-btn.secondary {
+  background: #ffffff;
+  color: var(--sage);
+}
+
+.payload-hint {
+  margin: 0.8rem 0 0;
+  color: var(--muted-ink);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.scanner-feedback {
+  margin: 0.65rem 0 0;
+  font-size: 0.88rem;
+}
+
+.scanner-feedback.error {
+  color: #a14f4f;
+}
+
+.scanner-feedback.success {
+  color: #28714d;
+}
+
+.scanner-video {
+  display: block;
+  width: min(100%, 560px);
+  max-height: 360px;
+  margin: 0.8rem auto 0;
+  border-radius: 10px;
+  background: #17231e;
+  object-fit: cover;
+}
+
+.scan-result {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin-top: 0.9rem;
+  padding: 0.9rem;
+  border: 1px solid #d5e8dc;
+  border-radius: 10px;
+  background: #f5faf6;
+}
+
+.scan-result > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.result-label {
+  color: var(--muted-ink);
+  font-size: 0.76rem;
+}
+
+.total-board-feet strong {
+  color: #28714d;
+  font-size: 1.15rem;
 }
 
 .muted {
@@ -1755,6 +1956,18 @@ th {
 
   .export-btn {
     width: 100%;
+  }
+
+  .scanner-heading {
+    flex-direction: column;
+  }
+
+  .scan-btn {
+    width: 100%;
+  }
+
+  .scan-result {
+    grid-template-columns: 1fr;
   }
 }
 </style>

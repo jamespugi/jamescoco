@@ -3,39 +3,34 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import mysql from 'mysql2/promise';
+import { createMysqlConfig } from './databaseConfig.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
-const DB_HOST = process.env.DB_HOST || 'localhost';
-const DB_PORT = Number(process.env.DB_PORT) || 3306;
-const DB_USER = process.env.DB_USER || 'root';
-const DB_PASSWORD = process.env.DB_PASSWORD || '';
-const DB_NAME = process.env.DB_NAME || 'new_cocolytics';
+const { baseConfig, database: DB_NAME, poolConfig } = createMysqlConfig();
 const MIGRATIONS_TABLE = 'schema_migrations';
+const DEMO_DATA_MIGRATIONS = new Set([
+  '023_seed_demo_traders.sql',
+  '026_seed_demo_monthly_prices.sql',
+  '027_refresh_demo_operations_data.sql',
+  '028_rename_demo_coconut_product.sql',
+  '029_use_cocolumber_for_demo_products.sql',
+  '030_seed_empty_trader_inventory.sql',
+]);
 
-const migrationsDir = path.join(__dirname, 'migrations');
+const migrationsDir = path.resolve(__dirname, '../database/migrations');
 
-const baseConfig = {
-  host: DB_HOST,
-  port: DB_PORT,
-  user: DB_USER,
-  password: DB_PASSWORD,
-  multipleStatements: true,
-};
+export const pool = mysql.createPool(poolConfig);
 
-export const pool = mysql.createPool({
-  ...baseConfig,
-  database: DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-});
+function quoteIdentifier(identifier) {
+  return `\`${identifier.replace(/`/g, '``')}\``;
+}
 
 async function ensureDatabaseExists() {
   const connection = await mysql.createConnection(baseConfig);
-  await connection.query(`CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\``);
+  await connection.query(`CREATE DATABASE IF NOT EXISTS ${quoteIdentifier(DB_NAME)}`);
   await connection.end();
 }
 
@@ -59,6 +54,12 @@ async function getPendingMigrations() {
 }
 
 async function applyMigration(filename) {
+  if (DEMO_DATA_MIGRATIONS.has(filename)) {
+    await pool.execute(`INSERT INTO ${MIGRATIONS_TABLE} (name) VALUES (?)`, [filename]);
+    console.log(`Skipped demo-data migration ${filename}.`);
+    return;
+  }
+
   const migrationPath = path.join(migrationsDir, filename);
   const sql = await readFile(migrationPath, 'utf8');
   const connection = await pool.getConnection();
@@ -85,8 +86,11 @@ export async function runMigrations() {
   }
 }
 
-export async function initializeDatabase() {
-  await ensureDatabaseExists();
+export async function initializeDatabase({ createDatabase = process.env.NODE_ENV !== 'production' } = {}) {
+  if (createDatabase) {
+    await ensureDatabaseExists();
+  }
+
   await runMigrations();
 }
 
@@ -98,11 +102,12 @@ export async function importSqlFile(filePath) {
     throw new Error(`SQL file not found at ${filePath}`);
   }
 
-  const connection = await mysql.createConnection(baseConfig);
-  try {
-    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
-    await connection.changeUser({ database: DB_NAME });
+  if (process.env.NODE_ENV !== 'production') {
+    await ensureDatabaseExists();
+  }
 
+  const connection = await mysql.createConnection({ ...baseConfig, database: DB_NAME });
+  try {
     // if DB already has tables, skip import unless explicitly forced
     const [rows] = await connection.query(
       `SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = ?`,
@@ -116,6 +121,7 @@ export async function importSqlFile(filePath) {
     // Pre-process dump to make imports idempotent: add IF NOT EXISTS and remove USE statements
     let cleanedSql = sql
       .replace(/CREATE\s+DATABASE\s+(?!IF\s+NOT\s+EXISTS)/gi, 'CREATE DATABASE IF NOT EXISTS ')
+      .replace(/CREATE\s+DATABASE\s+IF\s+NOT\s+EXISTS\s+`[^`]+`[^;]*;/gi, '')
       .replace(/CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS)/gi, 'CREATE TABLE IF NOT EXISTS ')
       .replace(/USE\s+`[^`]+`\s*;/gi, '');
 

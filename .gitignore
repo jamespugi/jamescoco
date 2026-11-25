@@ -1,6 +1,15 @@
 backend/node_modules/
 frontend/node_modules/
 frontend/dist/
+**/dev-dist/
 backend/.env
+**/.env
+**/.env.*
+!**/.env.example
+/new_cocolytics_app.sql
+frontend/android/.gradle/
+frontend/android/local.properties
+frontend/android/**/build/
+frontend/android/**/.cxx/
 .DS_Store
 Thumbs.db

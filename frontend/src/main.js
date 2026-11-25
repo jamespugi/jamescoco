@@ -1,8 +1,14 @@
 import { createApp } from 'vue'
+import { IonicVue } from '@ionic/vue'
+import { Capacitor } from '@capacitor/core'
 import { registerSW } from 'virtual:pwa-register'
 import App from './App.vue'
 import router from './router'
 import { toastError } from './services/toast'
+import '@ionic/vue/css/core.css'
+import '@ionic/vue/css/normalize.css'
+import '@ionic/vue/css/structure.css'
+import '@ionic/vue/css/typography.css'
 import './style.css'
 
 document.title = 'Cocolytics'
@@ -45,7 +51,9 @@ function applyTabIcons() {
 }
 
 applyTabIcons()
-registerSW({ immediate: true })
+if (!Capacitor.isNativePlatform()) {
+	registerSW({ immediate: true })
+}
 
 const app = createApp(App)
 
@@ -54,4 +62,7 @@ app.config.errorHandler = (error) => {
 	toastError(message)
 }
 
-app.use(router).mount('#app')
+app.use(IonicVue)
+app.use(router)
+
+router.isReady().then(() => app.mount('#app'))

@@ -1,7 +1,8 @@
 import jwt from 'jsonwebtoken';
 import { findUserById } from '../models/userModel.js';
+import { getJwtSecret } from '../utils/jwtSecret.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret';
+const JWT_SECRET = getJwtSecret();
 
 export function getEffectiveUserRole(user) {
   if (!user) {

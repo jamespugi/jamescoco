@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted } from 'vue';
+import { IonApp } from '@ionic/vue';
 import AppToaster from './components/AppToaster.vue';
 import { toastError } from './services/toast';
 
@@ -15,6 +16,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <router-view />
-  <AppToaster />
+  <IonApp>
+    <router-view />
+    <AppToaster />
+  </IonApp>
 </template>

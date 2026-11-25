@@ -1,18 +1,16 @@
 import { pool } from '../db.js';
+import { getContactChannel, normalizeEmail, normalizePhoneNumber } from '../services/contactService.js';
 
-export function normalizeEmail(email) {
-  return String(email || '').trim().toLowerCase();
-}
-
-export async function createClientUser(fullName, email, passwordHash, staffReason = '') {
+export async function createClientUser({ fullName, email, phone, passwordHash, staffReason = '' }) {
   const [result] = await pool.execute(
     `
-      INSERT INTO users (full_name, email, password_hash, role, status, staff_reason, is_email_verified, email_verified_at)
-      VALUES (?, ?, ?, 'client', 'pending_client', ?, 0, NULL)
+      INSERT INTO users (full_name, email, phone, password_hash, role, status, staff_reason, is_email_verified, email_verified_at, is_phone_verified)
+      VALUES (?, ?, ?, ?, 'client', 'pending_client', ?, 0, NULL, 0)
     `,
     [
       String(fullName).trim(),
-      normalizeEmail(email),
+      email ? normalizeEmail(email) : null,
+      phone || null,
       passwordHash,
       String(staffReason || '').trim() || null,
     ]
@@ -36,7 +34,7 @@ export async function createGoogleUser(fullName, email, passwordHash, googleId) 
 export async function findUserByGoogleId(googleId) {
   const [rows] = await pool.execute(
     `
-      SELECT id, full_name, email, password_hash, role, status, is_email_verified, email_verified_at, is_archived, archived_at, created_at
+      SELECT id, full_name, email, phone, password_hash, role, status, is_email_verified, email_verified_at, is_phone_verified, is_archived, archived_at, created_at
       FROM users
       WHERE google_id = ?
       LIMIT 1
@@ -58,18 +56,22 @@ export async function linkGoogleIdToUser(id, googleId) {
   );
 }
 
-export async function findUserForLogin(email) {
-  const rawEmail = normalizeEmail(email);
-  const correctedEmail = rawEmail.replace(',', '.');
+export async function findUserForLogin(identifier) {
+  const channel = getContactChannel(identifier);
+  const value = channel === 'email'
+    ? normalizeEmail(identifier)
+    : normalizePhoneNumber(identifier);
+  const correctedEmail = value.replace(',', '.');
 
   const [rows] = await pool.execute(
     `
-      SELECT id, full_name, email, password_hash, role, status, is_email_verified, email_verified_at, is_archived, archived_at, created_at
+      SELECT id, full_name, email, phone, password_hash, role, status, is_email_verified, email_verified_at, is_phone_verified, is_archived, archived_at, created_at
       FROM users
-      WHERE email IN (?, ?)
+      WHERE (email IN (?, ?) AND ? = 'email')
+        OR (phone = ? AND ? = 'phone')
       LIMIT 1
     `,
-    [rawEmail, correctedEmail]
+    [value, correctedEmail, channel, value, channel]
   );
 
   return rows[0] || null;
@@ -83,11 +85,13 @@ export async function findUserByEmail(email) {
         id,
         full_name,
         email,
+        phone,
         password_hash,
         role,
         status,
         is_email_verified,
         email_verified_at,
+        is_phone_verified,
         is_archived,
         archived_at,
         created_at
@@ -101,6 +105,38 @@ export async function findUserByEmail(email) {
   return rows[0] || null;
 }
 
+export async function findUserByPhone(phone) {
+  const normalizedPhone = normalizePhoneNumber(phone);
+  const [rows] = await pool.execute(
+    `
+      SELECT
+        id,
+        full_name,
+        email,
+        phone,
+        password_hash,
+        role,
+        status,
+        is_email_verified,
+        email_verified_at,
+        is_phone_verified,
+        is_archived,
+        archived_at,
+        created_at
+      FROM users
+      WHERE phone = ?
+      LIMIT 1
+    `,
+    [normalizedPhone]
+  );
+
+  return rows[0] || null;
+}
+
+export async function findUserByContact(contact, channel = getContactChannel(contact)) {
+  return channel === 'phone' ? findUserByPhone(contact) : findUserByEmail(contact);
+}
+
 export async function findUserById(id) {
   const [rows] = await pool.execute(
     `
@@ -108,11 +144,13 @@ export async function findUserById(id) {
         id,
         full_name,
         email,
+        phone,
         password_hash,
         role,
         status,
         is_email_verified,
         email_verified_at,
+        is_phone_verified,
         profile_name,
         profile_description,
         contact_number,
@@ -160,6 +198,19 @@ export async function markUserEmailVerifiedById(id) {
   return result.affectedRows;
 }
 
+export async function markUserPhoneVerifiedById(id) {
+  const [result] = await pool.execute(
+    `
+      UPDATE users
+      SET is_phone_verified = 1
+      WHERE id = ?
+    `,
+    [id]
+  );
+
+  return result.affectedRows;
+}
+
 export async function updateUserPasswordHashById(id, passwordHash) {
   const [result] = await pool.execute(
     `
@@ -173,44 +224,58 @@ export async function updateUserPasswordHashById(id, passwordHash) {
   return result.affectedRows;
 }
 
-export async function createOtpCode({ userId, email, purpose, otpHash, expiresAt }) {
-  const normalizedEmail = normalizeEmail(email);
+export async function createOtpCode({ userId, recipient, channel = 'email', purpose, otpHash, expiresAt }) {
+  const normalizedRecipient = channel === 'email'
+    ? normalizeEmail(recipient)
+    : normalizePhoneNumber(recipient);
 
   await pool.execute(
     `
       UPDATE user_otp_codes
       SET used_at = CURRENT_TIMESTAMP
-      WHERE email = ?
+      WHERE recipient = ?
+        AND channel = ?
         AND purpose = ?
         AND used_at IS NULL
     `,
-    [normalizedEmail, purpose]
+    [normalizedRecipient, channel, purpose]
   );
 
   const [result] = await pool.execute(
     `
-      INSERT INTO user_otp_codes (user_id, email, purpose, otp_hash, expires_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO user_otp_codes (user_id, email, channel, recipient, purpose, otp_hash, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `,
-    [userId, normalizedEmail, purpose, otpHash, expiresAt]
+    [
+      userId,
+      channel === 'email' ? normalizedRecipient : null,
+      channel,
+      normalizedRecipient,
+      purpose,
+      otpHash,
+      expiresAt,
+    ]
   );
 
   return result.insertId;
 }
 
-export async function findLatestActiveOtpCode(email, purpose) {
-  const normalizedEmail = normalizeEmail(email);
+export async function findLatestActiveOtpCode(recipient, purpose, channel = 'email') {
+  const normalizedRecipient = channel === 'email'
+    ? normalizeEmail(recipient)
+    : normalizePhoneNumber(recipient);
   const [rows] = await pool.execute(
     `
-      SELECT id, user_id, email, purpose, otp_hash, expires_at, verified_at, used_at, created_at
+      SELECT id, user_id, email, channel, recipient, purpose, otp_hash, expires_at, verified_at, used_at, created_at
       FROM user_otp_codes
-      WHERE email = ?
+      WHERE recipient = ?
+        AND channel = ?
         AND purpose = ?
         AND used_at IS NULL
       ORDER BY id DESC
       LIMIT 1
     `,
-    [normalizedEmail, purpose]
+    [normalizedRecipient, channel, purpose]
   );
 
   return rows[0] || null;
@@ -219,7 +284,7 @@ export async function findLatestActiveOtpCode(email, purpose) {
 export async function findOtpCodeById(id) {
   const [rows] = await pool.execute(
     `
-      SELECT id, user_id, email, purpose, otp_hash, expires_at, verified_at, used_at, created_at
+      SELECT id, user_id, email, channel, recipient, purpose, otp_hash, expires_at, verified_at, used_at, created_at
       FROM user_otp_codes
       WHERE id = ?
       LIMIT 1
@@ -415,11 +480,13 @@ export function sanitizeUser(user) {
   return {
     id: user.id,
     fullName: user.full_name,
-    email: user.email,
+    email: user.email || '',
+    phone: user.phone || '',
     role: user.role,
     status: user.status,
     isEmailVerified: Boolean(user.is_email_verified),
     emailVerifiedAt: user.email_verified_at || null,
+    isPhoneVerified: Boolean(user.is_phone_verified),
     profileName: user.full_name || user.profile_name || '',
     profileDescription: user.profile_description || '',
     contactNumber: user.contact_number || '',

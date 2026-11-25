@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import multer from 'multer';
+import { getUploadDirectory } from '../utils/uploadPaths.js';
 import {
   createMessageBetweenTraders,
   listConversationPartnerIds,
@@ -73,14 +73,12 @@ import {
 } from '../models/operationsModel.js';
 import { createPayMongoCheckoutSession } from '../services/paymongoService.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const uploadsDir = path.resolve(__dirname, '../../../frontend/public/uploads/products_img');
-const profileUploadsDir = path.resolve(__dirname, '../../../frontend/public/uploads/profile_img');
-const gcashQrUploadsDir = path.resolve(__dirname, '../../../frontend/public/uploads/gcash_qr');
-const paymentReceiptUploadsDir = path.resolve(__dirname, '../../../frontend/public/uploads/payment_receipts');
-const paperUploadsDir = path.resolve(__dirname, '../../../frontend/public/uploads/paper_docs');
-const messengerUploadsDir = path.resolve(__dirname, '../../../frontend/public/uploads/messenger');
+const uploadsDir = getUploadDirectory('products_img');
+const profileUploadsDir = getUploadDirectory('profile_img');
+const gcashQrUploadsDir = getUploadDirectory('gcash_qr');
+const paymentReceiptUploadsDir = getUploadDirectory('payment_receipts');
+const paperUploadsDir = getUploadDirectory('paper_docs');
+const messengerUploadsDir = getUploadDirectory('messenger');
 const PRESENCE_RECENT_WINDOW_MS = 90 * 1000;
 
 const storage = multer.diskStorage({

@@ -3,10 +3,14 @@ import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import { existsSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initializeDatabase, pool } from './db.js';
+import { getUploadDirectory, uploadsRoot } from './utils/uploadPaths.js';
 import { verifySmtpConnection } from './services/emailService.js';
+import { isSmsConfigured } from './services/smsService.js';
 import authRouter from './routes/authRoutes.js';
 import adminRouter from './routes/adminRoutes.js';
 import clientRouter from './routes/clientRoutes.js';
@@ -15,8 +19,14 @@ import { apiInfo, health } from './controllers/systemController.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:7904';
-const allowedOrigins = CLIENT_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean);
+const railwayOrigin = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : '';
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || railwayOrigin || 'http://localhost:7904';
+const allowedOrigins = [
+  ...CLIENT_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean),
+  'https://localhost',
+];
 const explicitOrigins = new Set();
 const wildcardOrigins = [];
 
@@ -57,10 +67,9 @@ function isOriginAllowed(origin) {
 }
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const productUploadsDir = path.resolve(__dirname, '../../frontend/public/uploads/products_img');
-const profileUploadsDir = path.resolve(__dirname, '../../frontend/public/uploads/profile_img');
-const paperUploadsDir = path.resolve(__dirname, '../../frontend/public/uploads/paper_docs');
-const messengerUploadsDir = path.resolve(__dirname, '../../frontend/public/uploads/messenger');
+const frontendDistDir = path.resolve(__dirname, '../../frontend/dist');
+const frontendIndexPath = path.join(frontendDistDir, 'index.html');
+const hasFrontendBuild = existsSync(frontendIndexPath);
 
 app.use(
   helmet({
@@ -81,12 +90,16 @@ app.use(
 );
 app.use(express.json());
 app.use(morgan('dev'));
-app.use('/uploads/products_img', express.static(productUploadsDir));
-app.use('/uploads/profile_img', express.static(profileUploadsDir));
-app.use('/uploads/paper_docs', express.static(paperUploadsDir));
-app.use('/uploads/messenger', express.static(messengerUploadsDir));
+for (const directory of ['products_img', 'profile_img', 'paper_docs', 'messenger', 'gcash_qr', 'payment_receipts']) {
+  app.use(`/uploads/${directory}`, express.static(getUploadDirectory(directory)));
+}
 
 app.get('/', (req, res) => {
+  if (hasFrontendBuild) {
+    res.sendFile(frontendIndexPath);
+    return;
+  }
+
   res.json({
     message: 'Cocolytics backend is running.',
     api: '/api',
@@ -100,6 +113,22 @@ app.use('/api/admin', adminRouter);
 app.use('/api/client', clientRouter);
 app.use('/api/trader', traderRouter);
 
+if (hasFrontendBuild) {
+  app.use(express.static(frontendDistDir));
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
+      next();
+      return;
+    }
+
+    res.sendFile(frontendIndexPath, (error) => {
+      if (error) {
+        next(error);
+      }
+    });
+  });
+}
+
 app.use((req, res) => {
   res.status(404).json({
     error: 'Not Found',
@@ -109,13 +138,25 @@ app.use((req, res) => {
 
 async function startServer() {
   try {
-    await initializeDatabase();
+    if (process.env.NODE_ENV === 'production' && !process.env.UPLOADS_DIR) {
+      throw new Error('Set UPLOADS_DIR to a persistent volume path before starting in production.');
+    }
+
+    await mkdir(uploadsRoot, { recursive: true });
+
+    if (process.env.NODE_ENV !== 'production') {
+      await initializeDatabase();
+    }
+
     await pool.query('SELECT 1');
     const smtpStatus = await verifySmtpConnection();
     if (smtpStatus.ready) {
       console.log('Gmail SMTP is ready for OTP delivery.');
     } else {
       console.warn(`Gmail SMTP is not ready: ${smtpStatus.reason}`);
+    }
+    if (!isSmsConfigured()) {
+      console.warn('Twilio SMS is not configured; phone verification codes cannot be delivered.');
     }
     app.listen(PORT, () => {
       console.log(`Backend listening on http://localhost:${PORT}`);

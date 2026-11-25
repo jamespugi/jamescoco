@@ -1,0 +1,10 @@
+.git
+**/node_modules
+**/dist
+**/dev-dist
+**/android
+**/.env
+**/.env.*
+frontend/public/uploads
+frontend/public/downloads/*.apk
+/new_cocolytics_app.sql

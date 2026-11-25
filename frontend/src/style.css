@@ -29,3 +29,7 @@ body {
     radial-gradient(85% 60% at 95% 100%, rgba(238, 146, 58, 0.22), transparent 82%),
     #07161d;
 }
+
+ion-app {
+  background: transparent;
+}

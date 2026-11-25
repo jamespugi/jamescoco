@@ -17,6 +17,9 @@ const router = useRouter();
 const mode = ref('login');
 const fullName = ref('');
 const email = ref('');
+const phone = ref('');
+const contactMethod = ref('email');
+const loginIdentifier = ref('');
 const password = ref('');
 const confirmPassword = ref('');
 const staffReason = ref('');
@@ -28,10 +31,12 @@ const googleButton = ref(null);
 const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 let googleScript;
 
-const verifyEmail = ref('');
+const verifyContact = ref('');
+const verifyChannel = ref('email');
 const verifyOtp = ref('');
 
-const forgotEmail = ref('');
+const forgotContact = ref('');
+const forgotChannel = ref('email');
 const forgotOtp = ref('');
 const resetToken = ref('');
 const forgotNewPassword = ref('');
@@ -39,6 +44,16 @@ const forgotConfirmPassword = ref('');
 
 function passwordIsStrong(value) {
   return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(value);
+}
+
+function normalizeOtpInput(value, channel = 'email') {
+  const cleaned = String(value || '').replace(/[^a-z0-9]/gi, '');
+  return channel === 'phone' ? cleaned.replace(/\D/g, '').slice(0, 6) : cleaned.toUpperCase().slice(0, 8);
+}
+
+function contactChannelFor(contact) {
+  const value = String(contact || '').trim();
+  return value && !value.includes('@') ? 'phone' : 'email';
 }
 
 function setFeedback(message, error = false) {
@@ -76,14 +91,18 @@ function routeAfterLogin(user) {
   return router.push('/client');
 }
 
-function openVerifyEmailScreen(prefillEmail = '') {
-  verifyEmail.value = String(prefillEmail || email.value || verifyEmail.value || '').trim();
+function openVerifyEmailScreen(prefillContact = '', channel = '') {
+  const contact = String(prefillContact || loginIdentifier.value || email.value || phone.value || verifyContact.value || '').trim();
+  verifyContact.value = contact;
+  verifyChannel.value = channel || contactChannelFor(contact);
   verifyOtp.value = '';
   setMode('verify-email');
 }
 
-function openForgotPasswordScreen(prefillEmail = '') {
-  forgotEmail.value = String(prefillEmail || email.value || '').trim();
+function openForgotPasswordScreen(prefillContact = '') {
+  const contact = String(prefillContact || loginIdentifier.value || email.value || '').trim();
+  forgotContact.value = contact;
+  forgotChannel.value = contactChannelFor(contact);
   forgotOtp.value = '';
   resetToken.value = '';
   forgotNewPassword.value = '';
@@ -93,7 +112,7 @@ function openForgotPasswordScreen(prefillEmail = '') {
 
 async function submitLogin() {
   const result = await login({
-    email: email.value,
+    identifier: loginIdentifier.value,
     password: password.value,
   });
 
@@ -170,20 +189,26 @@ async function submitRegister() {
 
   const result = await register({
     fullName: fullName.value,
-    email: email.value,
+    email: contactMethod.value === 'email' ? email.value : undefined,
+    phone: contactMethod.value === 'phone' ? phone.value : undefined,
     password: password.value,
     staffReason: staffReason.value,
   });
 
-  verifyEmail.value = result.email || email.value;
+  verifyContact.value = result.contact || (contactMethod.value === 'phone' ? phone.value : email.value);
+  verifyChannel.value = result.channel || contactMethod.value;
   verifyOtp.value = '';
   setMode('verify-email');
-  setFeedback('Registration complete. Enter the OTP sent to your email to verify.', false);
+  setFeedback(
+    `Registration complete. Enter the code sent by ${verifyChannel.value === 'phone' ? 'SMS' : 'email'} to verify your ${verifyChannel.value === 'phone' ? 'phone number' : 'email'}.`,
+    false
+  );
 }
 
 async function submitVerifyEmailOtp() {
   const result = await verifyEmailOtp({
-    email: verifyEmail.value,
+    contact: verifyContact.value,
+    channel: verifyChannel.value,
     otp: verifyOtp.value,
   });
 
@@ -195,8 +220,22 @@ async function resendVerifyOtp() {
   loading.value = true;
   setFeedback('', false);
   try {
-    await resendVerifyEmailOtp({ email: verifyEmail.value });
-    setFeedback('A new verification OTP was sent to your email.', false);
+    await resendVerifyEmailOtp({ contact: verifyContact.value, channel: verifyChannel.value });
+    setFeedback(`A new verification code was sent by ${verifyChannel.value === 'phone' ? 'SMS' : 'email'}.`, false);
+  } catch (error) {
+    setFeedback(error.message, true);
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function resendForgotOtp() {
+  loading.value = true;
+  setFeedback('', false);
+  try {
+    await requestForgotPasswordOtp({ contact: forgotContact.value, channel: forgotChannel.value });
+    forgotOtp.value = '';
+    setFeedback(`A new reset code was sent by ${forgotChannel.value === 'phone' ? 'SMS' : 'email'}.`, false);
   } catch (error) {
     setFeedback(error.message, true);
   } finally {
@@ -205,15 +244,16 @@ async function resendVerifyOtp() {
 }
 
 async function submitForgotEmail() {
-  const result = await requestForgotPasswordOtp({ email: forgotEmail.value });
+  await requestForgotPasswordOtp({ contact: forgotContact.value, channel: forgotChannel.value });
   forgotOtp.value = '';
   setMode('forgot-otp');
-  setFeedback('Enter the OTP sent to your email.', false);
+  setFeedback(`Enter the code sent by ${forgotChannel.value === 'phone' ? 'SMS' : 'email'}.`, false);
 }
 
 async function submitForgotOtp() {
   const result = await verifyForgotPasswordOtp({
-    email: forgotEmail.value,
+    contact: forgotContact.value,
+    channel: forgotChannel.value,
     otp: forgotOtp.value,
   });
 
@@ -279,11 +319,27 @@ async function submitForm() {
       await submitForgotResetPassword();
     }
   } catch (error) {
-    if (error.code === 'EMAIL_NOT_VERIFIED') {
-      verifyEmail.value = error.details?.email || email.value;
+    if (
+      ['SMS_DELIVERY_FAILED', 'EMAIL_DELIVERY_FAILED'].includes(error.code) &&
+      error.details?.contact
+    ) {
+      verifyContact.value = error.details.contact;
+      verifyChannel.value = error.details.channel || 'email';
       verifyOtp.value = '';
       setMode('verify-email');
-      setFeedback('Your account is not verified yet. Enter OTP or resend a new code.', true);
+      setFeedback(`${error.message} You can resend the code after the delivery service is configured.`, true);
+    } else if (error.code === 'EMAIL_NOT_VERIFIED') {
+      verifyContact.value = error.details?.contact || error.details?.email || loginIdentifier.value;
+      verifyChannel.value = error.details?.channel || 'email';
+      verifyOtp.value = '';
+      setMode('verify-email');
+      setFeedback('Your account is not verified yet. Enter the code or resend a new one.', true);
+    } else if (error.code === 'PHONE_NOT_VERIFIED') {
+      verifyContact.value = error.details?.contact || error.details?.phone || loginIdentifier.value;
+      verifyChannel.value = error.details?.channel || 'phone';
+      verifyOtp.value = '';
+      setMode('verify-email');
+      setFeedback('Your account is not verified yet. Enter the code or resend a new one.', true);
     } else {
       setFeedback(error.message, true);
     }
@@ -299,7 +355,7 @@ async function submitForm() {
       <p class="kicker">Cocolytics Access</p>
       <h1 v-if="mode === 'login'">Login to your account</h1>
       <h1 v-else-if="mode === 'register'">Create your account</h1>
-      <h1 v-else-if="mode === 'verify-email'">Verify your email</h1>
+      <h1 v-else-if="mode === 'verify-email'">Verify your {{ verifyChannel === 'phone' ? 'phone number' : 'email' }}</h1>
       <h1 v-else-if="mode === 'forgot-email'">Forgot password</h1>
       <h1 v-else-if="mode === 'forgot-otp'">Verify reset OTP</h1>
       <h1 v-else>Create a new password</h1>
@@ -316,9 +372,25 @@ async function submitForm() {
             <span>Full Name</span>
             <input v-model="fullName" type="text" placeholder="Juan Dela Cruz" required />
           </label>
-          <label>
+          <div class="tabs contact-method" aria-label="Signup contact method">
+            <button type="button" :class="{ active: contactMethod === 'email' }" @click="contactMethod = 'email'">Use Email</button>
+            <button type="button" :class="{ active: contactMethod === 'phone' }" @click="contactMethod = 'phone'">Use Phone</button>
+          </div>
+          <label v-if="contactMethod === 'email'">
             <span>Email</span>
-            <input v-model="email" type="email" placeholder="you@example.com" required />
+            <input v-model="email" type="email" autocomplete="email" placeholder="you@example.com" required />
+          </label>
+          <label v-else>
+            <span>Phone number (include country code)</span>
+            <input
+              v-model="phone"
+              type="tel"
+              inputmode="tel"
+              autocomplete="tel"
+              placeholder="+639171234567"
+              required
+            />
+            <small>Use international format, for example +639171234567.</small>
           </label>
           <label>
             <span>Password</span>
@@ -425,8 +497,8 @@ async function submitForm() {
 
         <template v-else-if="mode === 'login'">
           <label>
-            <span>Email</span>
-            <input v-model="email" type="email" placeholder="you@example.com" required />
+            <span>Email or phone number</span>
+            <input v-model="loginIdentifier" type="text" autocomplete="username" placeholder="you@example.com or +639171234567" required />
           </label>
           <label>
             <span>Password</span>
@@ -478,30 +550,69 @@ async function submitForm() {
 
         <template v-else-if="mode === 'verify-email'">
           <label>
-            <span>Email</span>
-            <input v-model="verifyEmail" type="email" placeholder="you@example.com" required />
+            <span>{{ verifyChannel === 'phone' ? 'Phone number' : 'Email' }}</span>
+            <input
+              v-model="verifyContact"
+              :type="verifyChannel === 'phone' ? 'tel' : 'email'"
+              :placeholder="verifyChannel === 'phone' ? '+639171234567' : 'you@example.com'"
+              autocomplete="username"
+              @input="verifyChannel = contactChannelFor(verifyContact)"
+              required
+            />
           </label>
           <label>
-            <span>OTP (letters and numbers)</span>
-            <input v-model="verifyOtp" type="text" maxlength="8" placeholder="e.g. AB12CD34" required />
+            <span>{{ verifyChannel === 'phone' ? 'SMS code' : 'Email code' }}</span>
+            <input
+              v-model="verifyOtp"
+              type="text"
+              :maxlength="verifyChannel === 'phone' ? 6 : 8"
+              :inputmode="verifyChannel === 'phone' ? 'numeric' : 'text'"
+              autocomplete="one-time-code"
+              :placeholder="verifyChannel === 'phone' ? 'Enter 6-digit code' : 'e.g. AB12CD34'"
+              @input="verifyOtp = normalizeOtpInput(verifyOtp, verifyChannel)"
+              required
+            />
           </label>
         </template>
 
         <template v-else-if="mode === 'forgot-email'">
           <label>
-            <span>Enter your email</span>
-            <input v-model="forgotEmail" type="email" placeholder="you@example.com" required />
+            <span>Email or phone number</span>
+            <input
+              v-model="forgotContact"
+              type="text"
+              autocomplete="username"
+              placeholder="you@example.com or +639171234567"
+              @input="forgotChannel = contactChannelFor(forgotContact)"
+              required
+            />
           </label>
         </template>
 
         <template v-else-if="mode === 'forgot-otp'">
           <label>
-            <span>Email</span>
-            <input v-model="forgotEmail" type="email" placeholder="you@example.com" required />
+            <span>{{ forgotChannel === 'phone' ? 'Phone number' : 'Email' }}</span>
+            <input
+              v-model="forgotContact"
+              :type="forgotChannel === 'phone' ? 'tel' : 'email'"
+              :placeholder="forgotChannel === 'phone' ? '+639171234567' : 'you@example.com'"
+              autocomplete="username"
+              @input="forgotChannel = contactChannelFor(forgotContact)"
+              required
+            />
           </label>
           <label>
-            <span>OTP</span>
-            <input v-model="forgotOtp" type="text" maxlength="8" placeholder="Enter OTP" required />
+            <span>{{ forgotChannel === 'phone' ? 'SMS code' : 'Email code' }}</span>
+            <input
+              v-model="forgotOtp"
+              type="text"
+              :maxlength="forgotChannel === 'phone' ? 6 : 8"
+              :inputmode="forgotChannel === 'phone' ? 'numeric' : 'text'"
+              autocomplete="one-time-code"
+              placeholder="Enter code"
+              @input="forgotOtp = normalizeOtpInput(forgotOtp, forgotChannel)"
+              required
+            />
           </label>
         </template>
 
@@ -530,7 +641,7 @@ async function submitForm() {
           <span v-if="loading">Please wait...</span>
           <span v-else-if="mode === 'login'">Login</span>
           <span v-else-if="mode === 'register'">Register</span>
-          <span v-else-if="mode === 'verify-email'">Verify Email OTP</span>
+          <span v-else-if="mode === 'verify-email'">Verify Code</span>
           <span v-else-if="mode === 'forgot-email'">Send OTP</span>
           <span v-else-if="mode === 'forgot-otp'">Verify OTP</span>
           <span v-else>Reset Password</span>
@@ -543,8 +654,8 @@ async function submitForm() {
       </div>
 
       <div class="actions" v-if="mode === 'login'">
-        <button type="button" class="ghost" @click="openVerifyEmailScreen(email)">Verify Email</button>
-        <button type="button" class="ghost" @click="openForgotPasswordScreen(email)">Forgot Password</button>
+        <button type="button" class="ghost" @click="openVerifyEmailScreen(loginIdentifier)">Verify Account</button>
+        <button type="button" class="ghost" @click="openForgotPasswordScreen(loginIdentifier)">Forgot Password</button>
       </div>
 
       <div class="actions" v-else-if="mode === 'verify-email'">
@@ -553,7 +664,16 @@ async function submitForm() {
       </div>
 
       <div class="actions" v-else-if="mode === 'forgot-email' || mode === 'forgot-otp' || mode === 'forgot-reset'">
-        <button type="button" class="ghost" @click="openForgotPasswordScreen(forgotEmail)">Start Over</button>
+        <button
+          v-if="mode === 'forgot-otp'"
+          type="button"
+          class="ghost"
+          @click="resendForgotOtp"
+          :disabled="loading"
+        >
+          Resend OTP
+        </button>
+        <button type="button" class="ghost" @click="openForgotPasswordScreen(forgotContact)">Start Over</button>
         <button type="button" class="ghost" @click="setMode('login')">Back to Login</button>
       </div>
 

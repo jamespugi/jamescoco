@@ -1,8 +1,17 @@
 import { clearSession, getToken } from './session';
 import { toastError, toastSuccess } from './toast';
+import { Capacitor } from '@capacitor/core';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const FORCED_LOGOUT_MESSAGE_KEY = 'cocolytics_forced_logout_message';
+
+function getApiBaseUrl() {
+  if (Capacitor.isNativePlatform() && !API_BASE_URL) {
+    throw new Error('Set VITE_API_BASE_URL to the deployed Cocolytics API URL and rebuild the Android app.');
+  }
+
+  return API_BASE_URL;
+}
 
 function resolveDefaultSuccessMessage(method) {
   if (method === 'POST') return 'Created successfully.';
@@ -26,12 +35,22 @@ async function request(path, options = {}, meta = {}) {
   }
 
   if (token) {
-    headers.Authorization = `Bearer ${token}`;
+    headers.Authorization = 'Bearer ' + token;
+  }
+
+  let apiBaseUrl;
+  try {
+    apiBaseUrl = getApiBaseUrl();
+  } catch (error) {
+    if (shouldToastError) {
+      toastError(error.message);
+    }
+    throw error;
   }
 
   let response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
+    response = await fetch(`${apiBaseUrl}${path}`, {
       ...options,
       headers,
     });
@@ -44,9 +63,24 @@ async function request(path, options = {}, meta = {}) {
     throw requestError;
   }
 
-  const data = await response.json().catch(() => ({}));
+  const contentType = response.headers.get('content-type') || '';
+  const responseBody = await response.text();
+  let data = {};
+  if (responseBody.trim()) {
+    if (contentType.includes('application/json')) {
+      try {
+        data = JSON.parse(responseBody);
+      } catch {
+        data = {};
+      }
+    } else if (!contentType.includes('text/html')) {
+      data = { error: responseBody.trim().slice(0, 200) };
+    }
+  }
+
   if (!response.ok) {
-    const errorMessage = data.error || data.message || 'Request failed';
+    const statusMessage = `Request failed (HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}).`;
+    const errorMessage = data.error || data.message || statusMessage;
     const isArchivedError = data.code === 'ACCOUNT_ARCHIVED';
     const isInvalidTokenError = errorMessage === 'Invalid or expired authentication token.' || errorMessage === 'Missing authentication token.';
 
@@ -126,7 +160,7 @@ export function verifyEmailOtp(payload) {
     method: 'POST',
     body: JSON.stringify(payload),
   }, {
-    successMessage: 'Email verified successfully.',
+    successMessage: 'Contact verified successfully.',
   });
 }
 
@@ -135,7 +169,7 @@ export function requestForgotPasswordOtp(payload) {
     method: 'POST',
     body: JSON.stringify(payload),
   }, {
-    successMessage: 'OTP sent if your email exists.',
+    successMessage: 'If your account exists, a reset code has been sent.',
   });
 }
 
@@ -688,12 +722,13 @@ export function getAdminMessageStreamUrl() {
 
 function getRoleMessageStreamUrl(streamPath) {
   const token = getToken();
+  const apiBaseUrl = getApiBaseUrl();
   if (!token) {
-    return `${API_BASE_URL}${streamPath}`;
+    return `${apiBaseUrl}${streamPath}`;
   }
 
   const separator = streamPath.includes('?') ? '&' : '?';
-  return `${API_BASE_URL}${streamPath}${separator}token=${encodeURIComponent(token)}`;
+  return `${apiBaseUrl}${streamPath}${separator}token=${encodeURIComponent(token)}`;
 }
 
 export function fetchTraderPaperUploads() {

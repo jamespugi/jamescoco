@@ -1,11 +1,21 @@
+import crypto from 'node:crypto';
+
 const OTP_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const DEFAULT_OTP_LENGTH = 8;
 
 export function generateAlphaNumericOtp(length = DEFAULT_OTP_LENGTH) {
   let otp = '';
   for (let i = 0; i < length; i += 1) {
-    const randomIndex = Math.floor(Math.random() * OTP_ALPHABET.length);
+    const randomIndex = crypto.randomInt(0, OTP_ALPHABET.length);
     otp += OTP_ALPHABET[randomIndex];
+  }
+  return otp;
+}
+
+export function generateNumericOtp(length = 6) {
+  let otp = '';
+  for (let i = 0; i < length; i += 1) {
+    otp += crypto.randomInt(0, 10);
   }
   return otp;
 }
