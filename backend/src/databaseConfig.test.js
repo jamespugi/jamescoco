@@ -60,6 +60,36 @@ test('requires explicit credentials in production', () => {
   );
 });
 
+test('requires explicit opt-in for an empty production MySQL password', () => {
+  assert.throws(
+    () => createMysqlConfig({
+      NODE_ENV: 'production',
+      DB_HOST: 'mysql.internal',
+      DB_USER: 'app_user',
+      DB_PASSWORD: '',
+      DB_NAME: 'cocolyntiks',
+    }),
+    /DB_ALLOW_EMPTY_PASSWORD=true/
+  );
+});
+
+test('allows an intentionally empty production password when opted in', () => {
+  const config = createMysqlConfig({
+    NODE_ENV: 'production',
+    DB_HOST: 'mysql.internal',
+    DB_PORT: '3306',
+    DB_USER: 'root',
+    DB_PASSWORD: '',
+    DB_ALLOW_EMPTY_PASSWORD: 'true',
+    DB_NAME: 'cocolyntiks',
+  });
+
+  assert.equal(config.database, 'cocolyntiks');
+  assert.equal(config.poolConfig.host, 'mysql.internal');
+  assert.equal(config.poolConfig.port, 3306);
+  assert.equal(config.poolConfig.password, '');
+});
+
 test('keeps localhost defaults for development', () => {
   const config = createMysqlConfig({ NODE_ENV: 'development' });
 
