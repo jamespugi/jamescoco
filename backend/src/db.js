@@ -20,7 +20,7 @@ const DEMO_DATA_MIGRATIONS = new Set([
   '030_seed_empty_trader_inventory.sql',
 ]);
 
-const migrationsDir = path.resolve(__dirname, '../database/migrations');
+const migrationsDir = path.resolve(__dirname, '../../database/migrations');
 
 export const pool = mysql.createPool(poolConfig);
 

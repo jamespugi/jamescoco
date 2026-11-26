@@ -11,7 +11,7 @@ Clean full-stack setup with:
 - `backend/src/controllers/`, `routes/`, `middlewares/`, and `realtime/` — API and transport
 - `backend/src/models/` and `services/` — database access and application services
 - `backend/src/utils/` — backend helpers
-- `backend/database/migrations/` — ordered MySQL schema and data migrations
+- `database/migrations/` — ordered MySQL schema and data migrations
 - `frontend/src/components/`, `pages/`, and `services/` — Vue UI and API clients
 - `frontend/src/assets/` and `frontend/public/` — bundled and static assets
 - `frontend/android/` — Capacitor Android project
@@ -72,6 +72,15 @@ To enable SMS, add these values to `backend/.env` and restart the backend:
 - Either `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID`
 
 Create a Twilio account and sender/messaging service first. Twilio trial accounts may only send to phone numbers verified with Twilio. Do not put these credentials in the frontend or APK.
+
+## Dokploy Production Setup
+
+1. In Dokploy, create a MySQL service and deploy this repository as an application using the root `docker-compose.yml`. The Compose file builds the app from the root `Dockerfile`; it does not create a database container, so the app connects to your separate MySQL service.
+2. Set the application environment variables. Use `NODE_ENV=production`, `PORT=5000`, `DB_HOST` set to the MySQL service's internal hostname, `DB_PORT=3306`, `DB_NAME=new_cocolytics`, `DB_USER=cocolytics_user`, and `DB_PASSWORD` set to the actual MySQL password configured for that service. `mysql` is valid for `DB_HOST` only if that is the internal hostname Dokploy assigns.
+3. Set `JWT_SECRET` to a new random value. Generate one locally with `node -e "console.log(require('node:crypto').randomBytes(48).toString('base64'))"` and paste the output into Dokploy's secret environment variable field. Do not commit the generated value or reuse the placeholder. Also set `CLIENT_ORIGIN` to the app's HTTPS domain.
+4. Keep the Compose named volume mounted at `/data`; it stores user uploads under `/data/uploads` across deployments.
+5. Configure the app's internal/domain target port as `5000` and its pre-deploy command as `node backend/src/migrate.js`. Ensure the MySQL service is running and reachable before the migration command runs.
+6. After deployment, open `/api/health` on the HTTPS domain and confirm it returns a healthy response. Keep the database private and configure backups before moving live data.
 
 ## Railway Production Setup
 
