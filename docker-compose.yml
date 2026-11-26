@@ -16,7 +16,6 @@ services:
       DB_PORT: ${DB_PORT:-${MYSQLPORT:-${MYSQL_PORT:-}}}
       DB_USER: ${DB_USER:-${MYSQLUSER:-${MYSQL_USER:-}}}
       DB_PASSWORD: ${DB_PASSWORD:-${MYSQLPASSWORD:-${MYSQL_PASSWORD:-}}}
-      DB_ALLOW_EMPTY_PASSWORD: ${DB_ALLOW_EMPTY_PASSWORD:-false}
       DB_NAME: ${DB_NAME:-${MYSQLDATABASE:-${MYSQL_DATABASE:-}}}
       DATABASE_URL: ${DATABASE_URL:-${MYSQL_URL:-}}
       DB_SSL: ${DB_SSL:-false}
@@ -24,15 +23,6 @@ services:
       - "5000"
     volumes:
       - cocolytics_uploads:/data
-    networks:
-      - default
-      - cocolytics-network
 
 volumes:
   cocolytics_uploads:
-
-networks:
-  default: {}
-  cocolytics-network:
-    external: true
-    name: cocolytics-network
