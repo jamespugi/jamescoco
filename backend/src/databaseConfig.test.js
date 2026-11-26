@@ -40,7 +40,11 @@ test('parses a MySQL URL and decodes its credentials', () => {
   const config = createMysqlConfig({
     NODE_ENV: 'production',
     MYSQL_URL: 'mysql://app%40user:p%40ss%3Aword@db.example.com:3307/cocolytics',
+    DB_HOST: '',
+    DB_PORT: '',
+    DB_USER: '',
     DB_PASSWORD: '',
+    DB_NAME: '',
   });
 
   assert.equal(config.database, 'cocolytics');
