@@ -158,8 +158,8 @@ async function startServer() {
     if (!isSmsConfigured()) {
       console.warn('Twilio SMS is not configured; phone verification codes cannot be delivered.');
     }
-    app.listen(PORT, () => {
-      console.log(`Backend listening on http://localhost:${PORT}`);
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Backend listening on 0.0.0.0:${PORT}`);
     });
   } catch (error) {
     console.error('Failed to start backend:', error?.message || error?.code || String(error));

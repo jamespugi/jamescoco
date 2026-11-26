@@ -4,6 +4,10 @@ async function run() {
   try {
     const importPath = process.env.IMPORT_SQL_PATH;
     if (importPath) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('IMPORT_SQL_PATH is disabled for production migrations. Import the backup separately into an empty database.');
+      }
+
       const result = await importSqlFile(importPath);
       if (result.skipped) {
         console.log(`SQL import skipped: ${result.reason}`);

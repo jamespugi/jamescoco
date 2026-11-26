@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import mysql from 'mysql2/promise';
 import { createMysqlConfig } from './databaseConfig.js';
+import { assertSafeMigrationHistory, getPendingMigrationNames } from './migrationSafety.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,6 +36,22 @@ async function ensureDatabaseExists() {
 }
 
 async function ensureMigrationsTable() {
+  const [tableRows] = await pool.query(`
+    SELECT TABLE_NAME AS tableName
+    FROM information_schema.tables
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'
+  `);
+  const tableNames = tableRows.map((row) => row.tableName);
+  const hasMigrationsTable = tableNames.includes(MIGRATIONS_TABLE);
+  const [migrationRows] = hasMigrationsTable
+    ? await pool.query(`SELECT name FROM ${MIGRATIONS_TABLE}`)
+    : [[]];
+
+  assertSafeMigrationHistory(
+    tableNames,
+    migrationRows.map((row) => row.name)
+  );
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (
       id INT NOT NULL AUTO_INCREMENT,
@@ -48,9 +65,7 @@ async function ensureMigrationsTable() {
 async function getPendingMigrations() {
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith('.sql')).sort();
   const [rows] = await pool.query(`SELECT name FROM ${MIGRATIONS_TABLE}`);
-  const applied = new Set(rows.map((row) => row.name));
-
-  return files.filter((file) => !applied.has(file));
+  return getPendingMigrationNames(files, rows.map((row) => row.name));
 }
 
 async function applyMigration(filename) {
@@ -95,6 +110,10 @@ export async function initializeDatabase({ createDatabase = process.env.NODE_ENV
 }
 
 export async function importSqlFile(filePath) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('SQL dump imports are disabled in production migrations. Import backups separately into an empty database.');
+  }
+
   let sql;
   try {
     sql = await readFile(filePath, 'utf8');
