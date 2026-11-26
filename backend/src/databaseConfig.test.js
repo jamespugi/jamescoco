@@ -19,10 +19,28 @@ test('reads Railway MySQL service variables', () => {
   assert.equal(config.poolConfig.password, 'secret');
 });
 
+test('reads underscore-separated MySQL container variables', () => {
+  const config = createMysqlConfig({
+    NODE_ENV: 'production',
+    MYSQL_HOST: 'mysql',
+    MYSQL_PORT: '3307',
+    MYSQL_USER: 'app_user',
+    MYSQL_PASSWORD: 'secret',
+    MYSQL_DATABASE: 'cocolytics',
+  });
+
+  assert.equal(config.database, 'cocolytics');
+  assert.equal(config.poolConfig.host, 'mysql');
+  assert.equal(config.poolConfig.port, 3307);
+  assert.equal(config.poolConfig.user, 'app_user');
+  assert.equal(config.poolConfig.password, 'secret');
+});
+
 test('parses a MySQL URL and decodes its credentials', () => {
   const config = createMysqlConfig({
     NODE_ENV: 'production',
     MYSQL_URL: 'mysql://app%40user:p%40ss%3Aword@db.example.com:3307/cocolytics',
+    DB_PASSWORD: '',
   });
 
   assert.equal(config.database, 'cocolytics');

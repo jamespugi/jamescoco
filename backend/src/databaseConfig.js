@@ -38,18 +38,18 @@ export function createMysqlConfig(env = process.env) {
   const url = env.DATABASE_URL || env.MYSQL_URL;
   const urlConfig = url ? parseDatabaseUrl(url) : {};
   const config = {
-    host: env.DB_HOST || env.MYSQLHOST || urlConfig.host || (isProduction ? '' : 'localhost'),
-    port: parseInteger(env.DB_PORT || env.MYSQLPORT || urlConfig.port, 3306, 'DB_PORT', 1),
-    user: env.DB_USER || env.MYSQLUSER || urlConfig.user || (isProduction ? '' : 'root'),
-    password: env.DB_PASSWORD ?? env.MYSQLPASSWORD ?? urlConfig.password ?? (isProduction ? '' : ''),
-    database: env.DB_NAME || env.MYSQLDATABASE || urlConfig.database || (isProduction ? '' : 'new_cocolytics'),
+    host: env.DB_HOST || env.MYSQLHOST || env.MYSQL_HOST || urlConfig.host || (isProduction ? '' : 'localhost'),
+    port: parseInteger(env.DB_PORT || env.MYSQLPORT || env.MYSQL_PORT || urlConfig.port, 3306, 'DB_PORT', 1),
+    user: env.DB_USER || env.MYSQLUSER || env.MYSQL_USER || urlConfig.user || (isProduction ? '' : 'root'),
+    password: env.DB_PASSWORD || env.MYSQLPASSWORD || env.MYSQL_PASSWORD || urlConfig.password || (isProduction ? '' : ''),
+    database: env.DB_NAME || env.MYSQLDATABASE || env.MYSQL_DATABASE || urlConfig.database || (isProduction ? '' : 'new_cocolytics'),
   };
 
   const missing = [
-    ['host', config.host, 'DB_HOST, MYSQLHOST, or a MySQL URL'],
-    ['user', config.user, 'DB_USER, MYSQLUSER, or a MySQL URL'],
-    ['password', config.password, 'DB_PASSWORD, MYSQLPASSWORD, or a MySQL URL'],
-    ['database', config.database, 'DB_NAME, MYSQLDATABASE, or a MySQL URL'],
+    ['host', config.host, 'DB_HOST, MYSQLHOST, MYSQL_HOST, or a MySQL URL'],
+    ['user', config.user, 'DB_USER, MYSQLUSER, MYSQL_USER, or a MySQL URL'],
+    ['password', config.password, 'DB_PASSWORD, MYSQLPASSWORD, MYSQL_PASSWORD, or a MySQL URL'],
+    ['database', config.database, 'DB_NAME, MYSQLDATABASE, MYSQL_DATABASE, or a MySQL URL'],
   ].filter(([, value]) => !value);
 
   if (isProduction && missing.length) {
