@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import mysql from 'mysql2/promise';
 import { createMysqlConfig } from './databaseConfig.js';
 import { assertSafeMigrationHistory, getPendingMigrationNames } from './migrationSafety.js';
+import { getMysqlConnectionErrorMessage } from './mysqlConnectionErrors.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,6 +25,19 @@ const DEMO_DATA_MIGRATIONS = new Set([
 const migrationsDir = path.resolve(__dirname, '../../database/migrations');
 
 export const pool = mysql.createPool(poolConfig);
+
+export async function verifyDatabaseConnection() {
+  try {
+    await pool.query('SELECT 1');
+  } catch (error) {
+    const message = getMysqlConnectionErrorMessage(error, {
+      host: poolConfig.host,
+      port: poolConfig.port,
+      database: DB_NAME,
+    });
+    throw new Error(message, { cause: error });
+  }
+}
 
 function quoteIdentifier(identifier) {
   return `\`${identifier.replace(/`/g, '``')}\``;
@@ -93,6 +107,7 @@ async function applyMigration(filename) {
 }
 
 export async function runMigrations() {
+  await verifyDatabaseConnection();
   await ensureMigrationsTable();
   const pendingMigrations = await getPendingMigrations();
 

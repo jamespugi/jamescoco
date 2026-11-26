@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initializeDatabase, pool } from './db.js';
+import { initializeDatabase, verifyDatabaseConnection } from './db.js';
 import { getUploadDirectory, uploadsRoot } from './utils/uploadPaths.js';
 import { verifySmtpConnection } from './services/emailService.js';
 import { isSmsConfigured } from './services/smsService.js';
@@ -146,9 +146,10 @@ async function startServer() {
 
     if (process.env.NODE_ENV !== 'production') {
       await initializeDatabase();
+    } else {
+      await verifyDatabaseConnection();
     }
 
-    await pool.query('SELECT 1');
     const smtpStatus = await verifySmtpConnection();
     if (smtpStatus.ready) {
       console.log('Gmail SMTP is ready for OTP delivery.');
