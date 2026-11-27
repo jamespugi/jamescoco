@@ -3,11 +3,15 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import ConfirmationModal from '../../components/ConfirmationModal.vue';
 import {
-  archiveClient,
+  createManagedAccount,
+  deleteManagedAccount,
   fetchClientDetails,
-  fetchClients,
+  fetchManagedUsers,
+  setManagedAccountActive,
+  updateManagedAccount,
 } from '../../services/api';
 import { toMediaUrl } from '../../services/media';
+import { getUser } from '../../services/session';
 
 const route = useRoute();
 const router = useRouter();
@@ -22,6 +26,26 @@ const statusFilter = ref('all');
 const detailsLoading = ref(false);
 const selectedUser = ref(null);
 const documents = ref([]);
+const roleFilter = ref('all');
+const showCreateForm = ref(false);
+const createForm = ref({
+  fullName: '',
+  email: '',
+  phone: '',
+  password: '',
+  confirmPassword: '',
+  role: 'client',
+});
+const editingUser = ref(null);
+const editForm = ref({
+  fullName: '',
+  email: '',
+  phone: '',
+  role: 'client',
+});
+const showDeleteConfirm = ref(false);
+const deleteTarget = ref(null);
+const currentUserId = Number(getUser()?.id || 0);
 
 const ADMIN_USERS_UPDATED_EVENT = 'cocolytics-admin-users-updated';
 
@@ -42,6 +66,7 @@ const detailStatus = computed(() => {
 
 const filteredUsers = computed(() => {
   const statusValue = String(statusFilter.value || 'all').trim().toLowerCase();
+  const roleValue = String(roleFilter.value || 'all').trim().toLowerCase();
   const keyword = String(searchText.value || '').trim().toLowerCase();
 
   return users.value.filter((user) => {
@@ -52,6 +77,7 @@ const filteredUsers = computed(() => {
     const email = String(user.email || '').toLowerCase();
     const role = String(user.role || '').toLowerCase();
     const reason = String(user.staffReason || '').toLowerCase();
+    const roleMatch = roleValue === 'all' || role === roleValue;
     const keywordMatch = !keyword
       || name.includes(keyword)
       || email.includes(keyword)
@@ -59,7 +85,7 @@ const filteredUsers = computed(() => {
       || normalizedStatus.includes(keyword)
       || reason.includes(keyword);
 
-    return statusMatch && keywordMatch;
+    return statusMatch && roleMatch && keywordMatch;
   });
 });
 
@@ -67,8 +93,8 @@ async function loadUsers() {
   loading.value = true;
   feedback.value = '';
   try {
-    const data = await fetchClients();
-    users.value = data.clients;
+    const data = await fetchManagedUsers();
+    users.value = data.users || [];
   } catch (error) {
     feedback.value = error.message;
   } finally {
@@ -108,12 +134,91 @@ async function confirmArchiveClient() {
   cancelArchiveClient();
 
   try {
-    await archiveClient(selectedId);
+    await setManagedAccountActive(selectedId, false);
     await loadUsers();
     if (selectedUserId.value === selectedId) {
       await loadUserDetails(selectedId);
     }
     window.dispatchEvent(new CustomEvent(ADMIN_USERS_UPDATED_EVENT));
+  } catch (error) {
+    feedback.value = error.message;
+  }
+}
+
+function passwordIsStrong(value) {
+  return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(String(value || ''));
+}
+
+async function submitCreateAccount() {
+  if (createForm.value.password !== createForm.value.confirmPassword) {
+    feedback.value = 'Password and confirm password do not match.';
+    return;
+  }
+  if (!passwordIsStrong(createForm.value.password)) {
+    feedback.value = 'Password must be at least 8 characters and include uppercase, lowercase, and a number.';
+    return;
+  }
+  try {
+    await createManagedAccount(createForm.value);
+    feedback.value = 'Account created successfully.';
+    createForm.value = {
+      fullName: '',
+      email: '',
+      phone: '',
+      password: '',
+      confirmPassword: '',
+      role: 'client',
+    };
+    showCreateForm.value = false;
+    await loadUsers();
+  } catch (error) {
+    feedback.value = error.message;
+  }
+}
+
+function startEditUser(user) {
+  editingUser.value = user;
+  editForm.value = {
+    fullName: user.fullName || '',
+    email: user.email || '',
+    phone: user.phone || '',
+    role: user.role || 'client',
+  };
+}
+
+function cancelEditUser() {
+  editingUser.value = null;
+}
+
+async function submitEditUser() {
+  if (!editingUser.value) return;
+  if (Number(editingUser.value.id) === currentUserId && editForm.value.role !== 'admin') {
+    feedback.value = 'You cannot demote your own admin account.';
+    return;
+  }
+  try {
+    await updateManagedAccount(editingUser.value.id, editForm.value);
+    feedback.value = 'Account updated successfully.';
+    editingUser.value = null;
+    await loadUsers();
+  } catch (error) {
+    feedback.value = error.message;
+  }
+}
+
+function requestDeleteUser(user) {
+  deleteTarget.value = user;
+  showDeleteConfirm.value = true;
+}
+
+async function confirmDeleteUser() {
+  if (!deleteTarget.value) return;
+  const targetId = deleteTarget.value.id;
+  showDeleteConfirm.value = false;
+  deleteTarget.value = null;
+  try {
+    await deleteManagedAccount(targetId);
+    await loadUsers();
   } catch (error) {
     feedback.value = error.message;
   }
@@ -189,12 +294,83 @@ watch(selectedUserId, async (nextId, prevId) => {
   <section class="page">
     <header>
       <p class="kicker">Manage Users</p>
-      <h2>{{ isDetailView ? 'User Details' : 'Client Accounts' }}</h2>
+      <h2>{{ isDetailView ? 'User Details' : 'User Management' }}</h2>
     </header>
 
     <p v-if="feedback" class="feedback">{{ feedback }}</p>
 
     <section v-if="!isDetailView">
+      <div class="create-toolbar">
+        <button type="button" class="create-toggle" @click="showCreateForm = !showCreateForm">
+          {{ showCreateForm ? 'Close Create Account' : 'Create Account' }}
+        </button>
+      </div>
+
+      <form v-if="showCreateForm" class="create-form" @submit.prevent="submitCreateAccount">
+        <h3>Create Account</h3>
+        <div class="create-grid">
+          <label>
+            <span>Full Name</span>
+            <input v-model="createForm.fullName" type="text" required />
+          </label>
+          <label>
+            <span>Email</span>
+            <input v-model="createForm.email" type="email" required />
+          </label>
+          <label>
+            <span>Phone Number</span>
+            <input v-model="createForm.phone" type="tel" placeholder="+639171234567" />
+          </label>
+          <label>
+            <span>Account Role</span>
+            <select v-model="createForm.role">
+              <option value="client">Client</option>
+              <option value="trader">Trader</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
+          <label>
+            <span>Password</span>
+            <input v-model="createForm.password" type="password" required />
+          </label>
+          <label>
+            <span>Confirm Password</span>
+            <input v-model="createForm.confirmPassword" type="password" required />
+          </label>
+        </div>
+        <button type="submit" class="create-submit">Create Account</button>
+      </form>
+
+      <form v-if="editingUser" class="create-form" @submit.prevent="submitEditUser">
+        <h3>Edit Account: {{ editingUser.fullName }}</h3>
+        <div class="create-grid">
+          <label>
+            <span>Full Name</span>
+            <input v-model="editForm.fullName" type="text" required />
+          </label>
+          <label>
+            <span>Email</span>
+            <input v-model="editForm.email" type="email" required />
+          </label>
+          <label>
+            <span>Phone Number</span>
+            <input v-model="editForm.phone" type="tel" />
+          </label>
+          <label>
+            <span>Account Role</span>
+            <select v-model="editForm.role" :disabled="Number(editingUser.id) === currentUserId">
+              <option value="client">Client</option>
+              <option value="trader">Trader</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
+        </div>
+        <div class="edit-actions">
+          <button type="submit" class="create-submit">Save Changes</button>
+          <button type="button" class="action-btn" @click="cancelEditUser">Cancel</button>
+        </div>
+      </form>
+
       <div class="filters">
       <input
         v-model="searchText"
@@ -210,6 +386,12 @@ watch(selectedUserId, async (nextId, prevId) => {
         <option value="pending_staff">Pending Staff</option>
         <option value="trader">Trader</option>
         <option value="archived">Archived</option>
+      </select>
+      <select v-model="roleFilter" class="status-filter">
+        <option value="all">Role: All</option>
+        <option value="admin">Admin</option>
+        <option value="client">Client</option>
+        <option value="trader">Trader</option>
       </select>
       </div>
 
@@ -247,17 +429,40 @@ watch(selectedUserId, async (nextId, prevId) => {
               <td>
                 <div class="action-stack">
                   <button
+                    v-if="user.role !== 'admin'"
                     class="action-btn view"
                     @click="openDetails(user)"
                   >
                     View Details
                   </button>
                   <button
+                    class="action-btn view"
+                    @click="startEditUser(user)"
+                  >
+                    Edit
+                  </button>
+                  <button
                     v-if="!user.isArchived"
                     class="action-btn danger"
+                    :disabled="Number(user.id) === currentUserId"
                     @click="requestArchiveClient(user)"
                   >
                     Archive User
+                  </button>
+                  <button
+                    v-else
+                    class="action-btn"
+                    :disabled="Number(user.id) === currentUserId"
+                    @click="setManagedAccountActive(user.id, true).then(loadUsers)"
+                  >
+                    Activate
+                  </button>
+                  <button
+                    v-if="Number(user.id) !== currentUserId"
+                    class="action-btn danger"
+                    @click="requestDeleteUser(user)"
+                  >
+                    Delete
                   </button>
                 </div>
               </td>
@@ -387,6 +592,16 @@ watch(selectedUserId, async (nextId, prevId) => {
       @confirm="confirmArchiveClient"
       @cancel="cancelArchiveClient"
     />
+    <ConfirmationModal
+      :visible="showDeleteConfirm"
+      title="Confirm Account Removal"
+      :message="`Remove ${deleteTarget?.fullName || 'this account'}? This will deactivate the account.`"
+      confirm-label="Yes, Remove"
+      cancel-label="Cancel"
+      :danger="true"
+      @confirm="confirmDeleteUser"
+      @cancel="showDeleteConfirm = false"
+    />
   </section>
 </template>
 
@@ -413,10 +628,71 @@ h2 {
   color: #ffbac7;
 }
 
+.create-toolbar {
+  margin-top: 0.8rem;
+}
+
+.create-toggle,
+.create-submit {
+  border: 1px solid rgba(126, 226, 191, 0.42);
+  border-radius: 8px;
+  background: rgba(22, 117, 90, 0.78);
+  color: #edfff6;
+  padding: 0.55rem 0.75rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.create-form {
+  margin-top: 0.8rem;
+  border: 1px solid rgba(140, 209, 255, 0.28);
+  border-radius: 12px;
+  background: rgba(8, 31, 48, 0.82);
+  padding: 0.85rem;
+}
+
+.create-form h3 {
+  margin: 0 0 0.75rem;
+}
+
+.create-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.create-grid label {
+  display: grid;
+  gap: 0.35rem;
+  color: #cfeaff;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.create-grid input,
+.create-grid select {
+  border: 1px solid rgba(121, 220, 183, 0.35);
+  border-radius: 8px;
+  background: rgba(7, 25, 33, 0.88);
+  color: #eefff8;
+  padding: 0.58rem 0.68rem;
+  font: inherit;
+}
+
+.create-submit {
+  margin-top: 0.75rem;
+}
+
+.edit-actions {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+}
+
 .filters {
   margin-top: 0.8rem;
   display: grid;
-  grid-template-columns: 1fr 220px;
+  grid-template-columns: 1fr 220px 180px;
   gap: 0.55rem;
 }
 
@@ -606,6 +882,10 @@ td {
 
 @media (max-width: 700px) {
   .filters {
+    grid-template-columns: 1fr;
+  }
+
+  .create-grid {
     grid-template-columns: 1fr;
   }
 }

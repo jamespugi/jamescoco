@@ -4,7 +4,6 @@ import { OAuth2Client } from 'google-auth-library';
 import crypto from 'node:crypto';
 import { createToken } from '../middlewares/authMiddleware.js';
 import {
-  createAdminUserWithSignupInvite,
   createClientUser,
   createOtpCode,
   createGoogleUser,
@@ -23,10 +22,6 @@ import {
   sanitizeUser,
   updateUserPasswordHashById,
 } from '../models/userModel.js';
-import {
-  isAdminSignupCodeConfigured,
-  matchesAdminSignupCode,
-} from '../utils/adminSignupInvite.js';
 import { sendOtpEmail } from '../services/emailService.js';
 import { sendOtpSms } from '../services/smsService.js';
 import { getContactChannel, isValidEmail, normalizeEmail, normalizePhoneNumber } from '../services/contactService.js';
@@ -111,26 +106,15 @@ function otpDeliveryResponse(otpResult, message) {
 
 export async function register(req, res) {
   const { fullName, password, staffReason } = req.body;
-  const signupRole = String(req.body.role || 'client').trim().toLowerCase();
-  const isAdminSignup = signupRole === 'admin';
   const email = String(req.body.email || '').trim();
   const phone = normalizePhoneNumber(req.body.phone);
   const hasEmail = Boolean(email);
   const hasPhone = Boolean(req.body.phone);
   const channel = hasPhone ? 'phone' : 'email';
-
-  if (!['client', 'admin'].includes(signupRole)) {
-    return res.status(400).json({ error: 'Choose a supported signup role.' });
-  }
-
-  if (!fullName || !password || (!isAdminSignup && !String(staffReason || '').trim()) || hasEmail === hasPhone) {
+  if (!fullName || !password || !String(staffReason || '').trim() || hasEmail === hasPhone) {
     return res.status(400).json({
       error: 'fullName, exactly one of email or phone, and password are required; client signups also require staffReason.',
     });
-  }
-
-  if (isAdminSignup && (!hasEmail || hasPhone)) {
-    return res.status(400).json({ error: 'Admin signup requires an email address.' });
   }
 
   if (hasEmail && !isValidEmail(email)) {
@@ -145,18 +129,9 @@ export async function register(req, res) {
     return res.status(400).json({ error: 'Password must be at least 8 characters and include uppercase, lowercase, and a number.' });
   }
 
-  if (isAdminSignup && !isAdminSignupCodeConfigured()) {
-    return res.status(503).json({ error: 'Admin signup is not configured.' });
-  }
-
-  if (isAdminSignup && !matchesAdminSignupCode(req.body.adminSignupCode)) {
-    return res.status(403).json({ error: 'The admin signup invite code is invalid.' });
-  }
-
   try {
     const passwordHash = await bcrypt.hash(password, 10);
-    const createUser = isAdminSignup ? createAdminUserWithSignupInvite : createClientUser;
-    const userId = await createUser({
+    const userId = await createClientUser({
       fullName,
       email: hasEmail ? normalizeEmail(email) : null,
       phone: hasPhone ? phone : null,
@@ -178,21 +153,13 @@ export async function register(req, res) {
 
     return res.status(delivery.status === 200 ? 201 : delivery.status).json({
       ...delivery.body,
-      role: isAdminSignup ? 'admin' : 'client',
-      status: isAdminSignup ? 'accepted_client' : 'pending_client',
+      role: 'client',
+      status: 'pending_client',
       email: createdUser.email || '',
       phone: createdUser.phone || '',
       contact,
     });
   } catch (error) {
-    if (error?.code === 'ADMIN_SIGNUP_INVITE_USED') {
-      return res.status(409).json({ error: 'The one-time admin signup invite has already been used.' });
-    }
-
-    if (error?.code === 'ADMIN_SIGNUP_INVITE_NOT_INITIALIZED') {
-      return res.status(503).json({ error: 'Admin signup is not ready. Apply the database migrations and try again.' });
-    }
-
     if (error && error.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ error: 'Email or phone number already exists.' });
     }

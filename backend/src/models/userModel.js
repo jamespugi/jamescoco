@@ -19,66 +19,6 @@ export async function createClientUser({ fullName, email, phone, passwordHash, s
   return result.insertId;
 }
 
-export async function createAdminUserWithSignupInvite({ fullName, email, passwordHash }) {
-  const connection = await pool.getConnection();
-  let transactionStarted = false;
-
-  try {
-    await connection.beginTransaction();
-    transactionStarted = true;
-
-    const [inviteRows] = await connection.execute(
-      'SELECT used_at FROM admin_signup_invite_usage WHERE invite_id = 1 FOR UPDATE'
-    );
-    if (!inviteRows.length) {
-      const error = new Error('The one-time admin signup invite has not been initialized.');
-      error.code = 'ADMIN_SIGNUP_INVITE_NOT_INITIALIZED';
-      throw error;
-    }
-    if (inviteRows[0].used_at) {
-      const error = new Error('The one-time admin signup invite has already been used.');
-      error.code = 'ADMIN_SIGNUP_INVITE_USED';
-      throw error;
-    }
-
-    const [result] = await connection.execute(
-      `
-        INSERT INTO users (
-          full_name, email, phone, password_hash, role, status,
-          staff_reason, is_email_verified, email_verified_at, is_phone_verified
-        )
-        VALUES (?, ?, NULL, ?, 'admin', 'accepted_client', NULL, 0, NULL, 0)
-      `,
-      [String(fullName).trim(), email, passwordHash]
-    );
-
-    const [usageResult] = await connection.execute(
-      `
-        UPDATE admin_signup_invite_usage
-        SET used_at = CURRENT_TIMESTAMP, used_by = ?
-        WHERE invite_id = 1 AND used_at IS NULL
-      `,
-      [result.insertId]
-    );
-    if (usageResult.affectedRows !== 1) {
-      const error = new Error('The one-time admin signup invite has already been used.');
-      error.code = 'ADMIN_SIGNUP_INVITE_USED';
-      throw error;
-    }
-
-    await connection.commit();
-    transactionStarted = false;
-    return result.insertId;
-  } catch (error) {
-    if (transactionStarted) {
-      await connection.rollback();
-    }
-    throw error;
-  } finally {
-    connection.release();
-  }
-}
-
 export async function createGoogleUser(fullName, email, passwordHash, googleId) {
   const [result] = await pool.execute(
     `
@@ -392,6 +332,86 @@ export async function findAllNonAdminUsers() {
   );
 
   return rows;
+}
+
+export async function findAllUsers() {
+  const [rows] = await pool.execute(
+    `
+      SELECT id, full_name, email, phone, role, status, staff_reason,
+             is_email_verified, is_phone_verified, is_archived, archived_at, created_at
+      FROM users
+      ORDER BY created_at DESC
+    `
+  );
+  return rows;
+}
+
+export async function createManagedUser({ fullName, email, phone, passwordHash, role }) {
+  const normalizedRole = String(role || '').trim().toLowerCase();
+  const status = normalizedRole === 'trader' ? 'trader' : 'accepted_client';
+  const [result] = await pool.execute(
+    `
+      INSERT INTO users (
+        full_name, email, phone, password_hash, role, status,
+        staff_reason, is_email_verified, email_verified_at, is_phone_verified
+      )
+      VALUES (?, ?, ?, ?, ?, ?, NULL, 1, CURRENT_TIMESTAMP, 0)
+    `,
+    [
+      String(fullName).trim(),
+      normalizeEmail(email),
+      phone || null,
+      passwordHash,
+      normalizedRole,
+      status,
+    ]
+  );
+  return result.insertId;
+}
+
+export async function updateManagedUserById(id, { fullName, email, phone, role }) {
+  const normalizedRole = String(role || '').trim().toLowerCase();
+  const status = normalizedRole === 'trader' ? 'trader' : 'accepted_client';
+  const [result] = await pool.execute(
+    `
+      UPDATE users
+      SET full_name = ?, email = ?, phone = ?, role = ?, status = ?
+      WHERE id = ? AND is_archived = 0
+    `,
+    [
+      String(fullName).trim(),
+      normalizeEmail(email),
+      phone || null,
+      normalizedRole,
+      status,
+      id,
+    ]
+  );
+  return result.affectedRows;
+}
+
+export async function setUserArchivedById(id, archived) {
+  const [result] = await pool.execute(
+    `
+      UPDATE users
+      SET is_archived = ?, archived_at = ?
+      WHERE id = ?
+    `,
+    [archived ? 1 : 0, archived ? new Date() : null, id]
+  );
+  return result.affectedRows;
+}
+
+export async function deleteUserById(id) {
+  const [result] = await pool.execute(
+    `
+      UPDATE users
+      SET is_archived = 1, archived_at = NOW()
+      WHERE id = ?
+    `,
+    [id]
+  );
+  return result.affectedRows;
 }
 
 export async function acceptPendingClientById(id) {

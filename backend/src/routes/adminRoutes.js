@@ -9,6 +9,11 @@ import {
 	listPaperUploads,
 	restoreClient,
 	reviewPaperUpload,
+	listManagedUsers,
+	createManagedAccount,
+	updateManagedAccount,
+	setManagedAccountActive,
+	deleteManagedAccount,
 } from '../controllers/adminController.js';
 import { adminChatHandlers, uploadMessageImage } from '../controllers/chatController.js';
 import { authRequired, requireRole } from '../middlewares/authMiddleware.js';
@@ -16,6 +21,11 @@ import { authRequired, requireRole } from '../middlewares/authMiddleware.js';
 const adminRouter = Router();
 
 adminRouter.use(authRequired, requireRole(['admin']));
+adminRouter.get('/users', listManagedUsers);
+adminRouter.post('/users', createManagedAccount);
+adminRouter.patch('/users/:id', updateManagedAccount);
+adminRouter.patch('/users/:id/active', setManagedAccountActive);
+adminRouter.delete('/users/:id', deleteManagedAccount);
 adminRouter.get('/clients', listClients);
 adminRouter.get('/clients/:id/details', getClientDetails);
 adminRouter.patch('/clients/:id/accept-client', acceptClient);

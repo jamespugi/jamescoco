@@ -199,6 +199,37 @@ export function fetchClients() {
   return request('/api/admin/clients');
 }
 
+export function fetchManagedUsers() {
+  return request('/api/admin/users');
+}
+
+export function createManagedAccount(payload) {
+  return request('/api/admin/users', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateManagedAccount(id, payload) {
+  return request(`/api/admin/users/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function setManagedAccountActive(id, active) {
+  return request(`/api/admin/users/${id}/active`, {
+    method: 'PATCH',
+    body: JSON.stringify({ active }),
+  });
+}
+
+export function deleteManagedAccount(id) {
+  return request(`/api/admin/users/${id}`, {
+    method: 'DELETE',
+  });
+}
+
 export function acceptClient(id) {
   return request(`/api/admin/clients/${id}/accept-client`, {
     method: 'PATCH',

@@ -73,11 +73,9 @@ To enable SMS, add these values to `backend/.env` and restart the backend:
 
 Create a Twilio account and sender/messaging service first. Twilio trial accounts may only send to phone numbers verified with Twilio. Do not put these credentials in the frontend or APK.
 
-## One-Time Admin Signup
+## Admin Account Management
 
-Public signup can create an admin account only when the server validates the one-time invite code. Set `ADMIN_SIGNUP_CODE` in the backend environment to a cryptographically random value of at least 32 characters. Generate one locally with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. Never add the value to the frontend, source control, or chat.
-
-Apply database migrations before using the invite (`node backend/src/migrate.js`, or the Dokploy pre-deploy migration command). On the registration form, select **Admin (one-time invite required)**, enter the invite code, and verify the account's email by OTP. The invite is consumed atomically when the admin account is created and cannot be reused on that database; changing the environment value does not reset its consumed state.
+Public registration always creates a regular Client account and never accepts an administrator role or invite code. Administrators create Admin, Client, or Trader accounts from **User Management → Create Account**.
 
 ## Dokploy Production Setup
 
@@ -88,6 +86,27 @@ Apply database migrations before using the invite (`node backend/src/migrate.js`
 5. Before importing a backup, create an empty hosted database and import the SQL dump there only. The project dump contains `DROP TABLE IF EXISTS` statements, so importing it into a non-empty schema will replace matching tables and their data. The dump's `schema_migrations` history must be retained. Do not set `IMPORT_SQL_PATH` for production deployments.
 6. Configure the app's internal/domain target port as `5000` and its pre-deploy command as `node backend/src/migrate.js`. The app does not import dumps or run migrations during production startup. The migration command applies only migrations after the recorded history; it refuses a populated database with missing, empty, or gapped history rather than replaying old data-changing migrations. Ensure the MySQL service is running and reachable before the migration command runs.
 7. After deployment, open `/api/health` on the HTTPS domain and confirm it returns a healthy response. Keep the database private and configure backups before moving live data.
+
+### Initial Admin Account
+
+Open the Dokploy terminal for the running backend container. Its working directory is `/app`, and the initialization script uses the existing database environment variables.
+
+```sh
+cd /app
+export INITIAL_ADMIN_EMAIL='pcacalapan@gmail.com'
+export INITIAL_ADMIN_PASSWORD='Fababaer1234'
+export INITIAL_ADMIN_FULL_NAME='CocoLytics Administrator'
+npm --prefix backend run admin:create
+unset INITIAL_ADMIN_EMAIL INITIAL_ADMIN_PASSWORD INITIAL_ADMIN_FULL_NAME
+```
+
+The script updates the matching account if the email exists; otherwise it creates one account. It leaves other accounts unchanged. Verify login with:
+
+```sh
+curl -sS -X POST https://cocolytics.ormin.cloud/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier":"pcacalapan@gmail.com","password":"Fababaer1234"}'
+```
 
 ## Railway Production Setup
 
