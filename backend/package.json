@@ -9,6 +9,7 @@
     "start": "node src/server.js",
     "migrate": "node src/migrate.js",
     "seed": "node src/seedDemoData.js",
+    "db:truncate": "node src/truncateDatabase.js",
     "import-sql": "node src/import_sql.js",
     "test": "node --test"
   },
