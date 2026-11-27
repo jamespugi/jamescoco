@@ -10,6 +10,7 @@
     "migrate": "node src/migrate.js",
     "seed": "node src/seedDemoData.js",
     "db:truncate": "node src/truncateDatabase.js",
+    "db:drop": "node src/dropDatabase.js",
     "import-sql": "node src/import_sql.js",
     "test": "node --test"
   },
