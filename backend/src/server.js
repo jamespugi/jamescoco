@@ -3,10 +3,7 @@ import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { initializeDatabase, verifyDatabaseConnection } from './db.js';
 import { getUploadDirectory, uploadsRoot } from './utils/uploadPaths.js';
 import { verifySmtpConnection } from './services/emailService.js';
@@ -65,12 +62,6 @@ function isOriginAllowed(origin) {
 
   return false;
 }
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const frontendDistDir = path.resolve(__dirname, '../../frontend/dist');
-const frontendIndexPath = path.join(frontendDistDir, 'index.html');
-const hasFrontendBuild = existsSync(frontendIndexPath);
-
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },
@@ -95,13 +86,9 @@ for (const directory of ['products_img', 'profile_img', 'paper_docs', 'messenger
 }
 
 app.get('/', (req, res) => {
-  if (hasFrontendBuild) {
-    res.sendFile(frontendIndexPath);
-    return;
-  }
-
-  res.json({
-    message: 'Cocolytics backend is running.',
+  res.status(200).json({
+    message: 'CocoLytics Backend is running.',
+    service: 'CocoLytics API',
     api: '/api',
     health: '/api/health',
   });
@@ -112,22 +99,6 @@ app.use('/api/auth', authRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/client', clientRouter);
 app.use('/api/trader', traderRouter);
-
-if (hasFrontendBuild) {
-  app.use(express.static(frontendDistDir));
-  app.use((req, res, next) => {
-    if (req.method !== 'GET' || req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
-      next();
-      return;
-    }
-
-    res.sendFile(frontendIndexPath, (error) => {
-      if (error) {
-        next(error);
-      }
-    });
-  });
-}
 
 app.use((req, res) => {
   res.status(404).json({

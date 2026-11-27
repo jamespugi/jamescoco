@@ -94,7 +94,9 @@ function otpDeliveryResponse(otpResult, message) {
   return {
     status: 503,
     body: {
-      error: `The verification code could not be sent by ${otpResult.channel === 'phone' ? 'SMS' : 'email'}. Please try again shortly.`,
+      error: otpResult.channel === 'email' && otpResult.deliveryError
+        ? otpResult.deliveryError
+        : `The verification code could not be sent by ${otpResult.channel === 'phone' ? 'SMS' : 'email'}. Please try again shortly.`,
       code: otpResult.channel === 'phone' ? 'SMS_DELIVERY_FAILED' : 'EMAIL_DELIVERY_FAILED',
       channel: otpResult.channel,
       deliveryError: otpResult.deliveryError,

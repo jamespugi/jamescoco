@@ -12,6 +12,54 @@ function isPlaceholder(value) {
   return !value || value.includes('your-email@gmail.com') || value.includes('your-gmail-app-password');
 }
 
+export function getSmtpConfigurationError(env = process.env) {
+  const user = String(env.SMTP_USER || '').trim();
+  const password = String(env.SMTP_PASS || '').replace(/\s+/g, '');
+  const fromEmail = String(env.SMTP_FROM_EMAIL || user).trim();
+  const missingSettings = [];
+
+  if (isPlaceholder(user)) {
+    missingSettings.push('SMTP_USER');
+  }
+  if (isPlaceholder(password)) {
+    missingSettings.push('SMTP_PASS');
+  }
+  if (env.SMTP_FROM_EMAIL && isPlaceholder(fromEmail)) {
+    missingSettings.push('SMTP_FROM_EMAIL');
+  }
+
+  return missingSettings.length
+    ? `Email delivery is not configured. Set valid values for ${missingSettings.join(', ')} in backend/.env.`
+    : '';
+}
+
+export function sanitizeSmtpError(error, env = process.env) {
+  const diagnostic = [
+    error?.code && `code=${error.code}`,
+    error?.responseCode && `responseCode=${error.responseCode}`,
+    error?.command && `command=${error.command}`,
+    error?.message && `message=${error.message}`,
+  ].filter(Boolean).join('; ');
+  let safeDiagnostic = diagnostic || 'Unknown SMTP error.';
+
+  const password = String(env.SMTP_PASS || '');
+  const secrets = [
+    password,
+    password.replace(/\s+/g, ''),
+    env.SMTP_USER,
+    env.SMTP_FROM_EMAIL,
+  ];
+  for (const secret of secrets) {
+    if (secret && String(secret).length > 3) {
+      safeDiagnostic = safeDiagnostic.split(String(secret)).join('[redacted]');
+    }
+  }
+
+  return safeDiagnostic
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
+    .slice(0, 500);
+}
+
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
@@ -28,12 +76,13 @@ const transporter = nodemailer.createTransport({
 });
 
 export function isSmtpConfigured() {
-  return !isPlaceholder(SMTP_USER) && !isPlaceholder(SMTP_PASS) && !isPlaceholder(SMTP_FROM_EMAIL);
+  return !getSmtpConfigurationError();
 }
 
 export async function verifySmtpConnection() {
-  if (!isSmtpConfigured()) {
-    return { ready: false, reason: 'SMTP credentials are not configured.' };
+  const configurationError = getSmtpConfigurationError();
+  if (configurationError) {
+    return { ready: false, reason: configurationError };
   }
 
   try {
@@ -42,7 +91,7 @@ export async function verifySmtpConnection() {
   } catch (error) {
     return {
       ready: false,
-      reason: error?.message || 'Gmail SMTP rejected the connection.',
+      reason: `Gmail SMTP verification failed: ${sanitizeSmtpError(error)}`,
     };
   }
 }
@@ -72,10 +121,12 @@ function buildOtpMailContent({ purpose, otp, expiresMinutes }) {
 }
 
 export async function sendOtpEmail({ to, purpose, otp, expiresMinutes = 10 }) {
-  if (!isSmtpConfigured()) {
+  const configurationError = getSmtpConfigurationError();
+  if (configurationError) {
+    console.error(configurationError);
     return {
       sent: false,
-      reason: 'SMTP credentials are not configured.',
+      reason: configurationError,
     };
   }
 
@@ -96,9 +147,11 @@ export async function sendOtpEmail({ to, purpose, otp, expiresMinutes = 10 }) {
 
     return { sent: true };
   } catch (error) {
+    const diagnostic = sanitizeSmtpError(error);
+    console.error(`Gmail SMTP OTP delivery failed: ${diagnostic}`);
     return {
       sent: false,
-      reason: error?.message || 'The email provider rejected the message.',
+      reason: 'Gmail SMTP delivery failed. Check the backend logs for sanitized SMTP diagnostics.',
     };
   }
 }
