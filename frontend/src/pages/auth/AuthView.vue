@@ -17,8 +17,6 @@ const router = useRouter();
 const mode = ref('login');
 const fullName = ref('');
 const email = ref('');
-const phone = ref('');
-const contactMethod = ref('email');
 const loginIdentifier = ref('');
 const password = ref('');
 const confirmPassword = ref('');
@@ -92,7 +90,7 @@ function routeAfterLogin(user) {
 }
 
 function openVerifyEmailScreen(prefillContact = '', channel = '') {
-  const contact = String(prefillContact || loginIdentifier.value || email.value || phone.value || verifyContact.value || '').trim();
+  const contact = String(prefillContact || loginIdentifier.value || email.value || verifyContact.value || '').trim();
   verifyContact.value = contact;
   verifyChannel.value = channel || contactChannelFor(contact);
   verifyOtp.value = '';
@@ -189,13 +187,12 @@ async function submitRegister() {
 
   const result = await register({
     fullName: fullName.value,
-    email: contactMethod.value === 'email' ? email.value : undefined,
-    phone: contactMethod.value === 'phone' ? phone.value : undefined,
+    email: email.value,
     password: password.value,
     staffReason: staffReason.value,
   });
-  verifyContact.value = result.contact || (contactMethod.value === 'phone' ? phone.value : email.value);
-  verifyChannel.value = result.channel || contactMethod.value;
+  verifyContact.value = result.contact || email.value;
+  verifyChannel.value = 'email';
   verifyOtp.value = '';
   setMode('verify-email');
   setFeedback(
@@ -371,25 +368,9 @@ async function submitForm() {
             <span>Full Name</span>
             <input v-model="fullName" type="text" placeholder="Juan Dela Cruz" required />
           </label>
-          <div class="tabs contact-method" aria-label="Signup contact method">
-            <button type="button" :class="{ active: contactMethod === 'email' }" @click="contactMethod = 'email'">Use Email</button>
-            <button type="button" :class="{ active: contactMethod === 'phone' }" @click="contactMethod = 'phone'">Use Phone</button>
-          </div>
-          <label v-if="contactMethod === 'email'">
+          <label>
             <span>Email</span>
             <input v-model="email" type="email" autocomplete="email" placeholder="you@example.com" required />
-          </label>
-          <label v-else>
-            <span>Phone number (include country code)</span>
-            <input
-              v-model="phone"
-              type="tel"
-              inputmode="tel"
-              autocomplete="tel"
-              placeholder="+639171234567"
-              required
-            />
-            <small>Use international format, for example +639171234567.</small>
           </label>
           <label>
             <span>Password</span>

@@ -107,22 +107,18 @@ function otpDeliveryResponse(otpResult, message) {
 export async function register(req, res) {
   const { fullName, password, staffReason } = req.body;
   const email = String(req.body.email || '').trim();
-  const phone = normalizePhoneNumber(req.body.phone);
-  const hasEmail = Boolean(email);
-  const hasPhone = Boolean(req.body.phone);
-  const channel = hasPhone ? 'phone' : 'email';
-  if (!fullName || !password || !String(staffReason || '').trim() || hasEmail === hasPhone) {
+  if (String(req.body.phone || '').trim()) {
+    return res.status(400).json({ error: 'Public registration is email only.' });
+  }
+
+  if (!fullName || !email || !password || !String(staffReason || '').trim()) {
     return res.status(400).json({
-      error: 'fullName, exactly one of email or phone, and password are required; client signups also require staffReason.',
+      error: 'fullName, email, password, and staffReason are required.',
     });
   }
 
-  if (hasEmail && !isValidEmail(email)) {
+  if (!isValidEmail(email)) {
     return res.status(400).json({ error: 'Enter a valid email address.' });
-  }
-
-  if (hasPhone && !phone) {
-    return res.status(400).json({ error: 'Enter a valid phone number in international format, such as +639171234567.' });
   }
 
   if (!passwordIsStrong(password)) {
@@ -133,22 +129,22 @@ export async function register(req, res) {
     const passwordHash = await bcrypt.hash(password, 10);
     const userId = await createClientUser({
       fullName,
-      email: hasEmail ? normalizeEmail(email) : null,
-      phone: hasPhone ? phone : null,
+      email: normalizeEmail(email),
+      phone: null,
       passwordHash,
       staffReason,
     });
-    const contact = hasPhone ? phone : normalizeEmail(email);
+    const contact = normalizeEmail(email);
     const createdUser = await findUserById(userId);
 
     if (!createdUser) {
       return res.status(500).json({ error: 'Could not register user.' });
     }
 
-    const otpResult = await issueOtpForUser({ user: createdUser, purpose: 'verify_email', channel });
+    const otpResult = await issueOtpForUser({ user: createdUser, purpose: 'verify_email', channel: 'email' });
     const delivery = otpDeliveryResponse(
       otpResult,
-      `Registration successful. Verify your ${channel === 'phone' ? 'phone number with the SMS code' : 'email with the code sent to your inbox'}.`
+      'Registration successful. Verify your email with the code sent to your inbox.'
     );
 
     return res.status(delivery.status === 200 ? 201 : delivery.status).json({
@@ -161,7 +157,7 @@ export async function register(req, res) {
     });
   } catch (error) {
     if (error && error.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ error: 'Email or phone number already exists.' });
+      return res.status(409).json({ error: 'Email address already exists.' });
     }
 
     return respondToAuthFailure(res, error, 'Registration', 'Could not register user.');

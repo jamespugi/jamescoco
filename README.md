@@ -75,7 +75,7 @@ Create a Twilio account and sender/messaging service first. Twilio trial account
 
 ## Admin Account Management
 
-Public registration always creates a regular Client account and never accepts an administrator role or invite code. Administrators create Admin, Client, or Trader accounts from **User Management → Create Account**.
+Public registration is email-only and always creates a regular Client account; it never accepts a phone number, administrator role, or invite code. Existing phone accounts can continue to log in. Administrators create Admin, Client, or Trader accounts from **User Management → Create Account**.
 
 ## Dokploy Production Setup
 
@@ -93,8 +93,11 @@ Open the Dokploy terminal for the running backend container. Its working directo
 
 ```sh
 cd /app
-export INITIAL_ADMIN_EMAIL='pcacalapan@gmail.com'
-export INITIAL_ADMIN_PASSWORD='Fababaer1234'
+read -r -p 'Admin email: ' INITIAL_ADMIN_EMAIL
+export INITIAL_ADMIN_EMAIL
+read -r -s -p 'Admin password: ' INITIAL_ADMIN_PASSWORD
+printf '\n'
+export INITIAL_ADMIN_PASSWORD
 export INITIAL_ADMIN_FULL_NAME='CocoLytics Administrator'
 npm --prefix backend run admin:create
 unset INITIAL_ADMIN_EMAIL INITIAL_ADMIN_PASSWORD INITIAL_ADMIN_FULL_NAME
@@ -105,7 +108,7 @@ The script updates the matching account if the email exists; otherwise it create
 ```sh
 curl -sS -X POST https://cocolytics.ormin.cloud/api/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"identifier":"pcacalapan@gmail.com","password":"Fababaer1234"}'
+  -d '{"identifier":"YOUR_ADMIN_EMAIL","password":"YOUR_ADMIN_PASSWORD"}'
 ```
 
 ## Railway Production Setup
