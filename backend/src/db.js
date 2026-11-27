@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import { lookup } from 'node:dns/promises';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +28,23 @@ const migrationsDir = path.resolve(__dirname, '../../database/migrations');
 export const pool = mysql.createPool(poolConfig);
 
 export async function verifyDatabaseConnection() {
+  let addresses;
+
+  try {
+    addresses = await lookup(poolConfig.host, { all: true });
+  } catch (error) {
+    const message = getMysqlConnectionErrorMessage(error, {
+      host: poolConfig.host,
+      port: poolConfig.port,
+      database: DB_NAME,
+    });
+    throw new Error(`MySQL DNS diagnostic failed: ${message}`, { cause: error });
+  }
+
+  console.info(
+    `MySQL DNS resolved ${poolConfig.host} to ${addresses.map(({ address }) => address).join(', ')}.`
+  );
+
   try {
     await pool.query('SELECT 1');
   } catch (error) {
@@ -35,8 +53,10 @@ export async function verifyDatabaseConnection() {
       port: poolConfig.port,
       database: DB_NAME,
     });
-    throw new Error(message, { cause: error });
+    throw new Error(`MySQL connection diagnostic failed: ${message}`, { cause: error });
   }
+
+  console.info(`MySQL connection verified at ${poolConfig.host}:${poolConfig.port}/${DB_NAME}.`);
 }
 
 function quoteIdentifier(identifier) {
