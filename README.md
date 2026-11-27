@@ -73,6 +73,12 @@ To enable SMS, add these values to `backend/.env` and restart the backend:
 
 Create a Twilio account and sender/messaging service first. Twilio trial accounts may only send to phone numbers verified with Twilio. Do not put these credentials in the frontend or APK.
 
+## One-Time Admin Signup
+
+Public signup can create an admin account only when the server validates the one-time invite code. Set `ADMIN_SIGNUP_CODE` in the backend environment to a cryptographically random value of at least 32 characters. Generate one locally with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. Never add the value to the frontend, source control, or chat.
+
+Apply database migrations before using the invite (`node backend/src/migrate.js`, or the Dokploy pre-deploy migration command). On the registration form, select **Admin (one-time invite required)**, enter the invite code, and verify the account's email by OTP. The invite is consumed atomically when the admin account is created and cannot be reused on that database; changing the environment value does not reset its consumed state.
+
 ## Dokploy Production Setup
 
 1. In Dokploy, deploy this repository as an application using the root `docker-compose.yml`. The Compose file builds the app from the root `Dockerfile`, preserves its default network for Dokploy routing, and also joins the external `cocolytics-network` for MySQL. The Dokploy-managed MySQL service is not created or modified by this Compose file. On the VPS, first verify or create the shared network with `docker network inspect cocolytics-network >/dev/null 2>&1 || docker network create --driver bridge cocolytics-network`. Find the existing MySQL container with `docker ps --format 'table {{.Names}}\t{{.Image}}'` and inspect its networks with `docker inspect <mysql-container> --format '{{json .NetworkSettings.Networks}}'`. If it is not attached to `cocolytics-network`, attach it live without restarting or recreating it: `docker network connect --alias cocolytics-database-drenvm cocolytics-network <mysql-container>`. Confirm that `cocolytics-database-drenvm` appears in the container's aliases for that network. If the container is already attached but lacks that alias, do not disconnect it; use a fresh external network name in both Compose and Dokploy, and attach the existing container to that network with the alias. Never publish MySQL port 3306 publicly.

@@ -19,6 +19,8 @@ const fullName = ref('');
 const email = ref('');
 const phone = ref('');
 const contactMethod = ref('email');
+const signupRole = ref('client');
+const adminSignupCode = ref('');
 const loginIdentifier = ref('');
 const password = ref('');
 const confirmPassword = ref('');
@@ -110,6 +112,13 @@ function openForgotPasswordScreen(prefillContact = '') {
   setMode('forgot-email');
 }
 
+function handleSignupRoleChange() {
+  adminSignupCode.value = '';
+  if (signupRole.value === 'admin') {
+    contactMethod.value = 'email';
+  }
+}
+
 async function submitLogin() {
   const result = await login({
     identifier: loginIdentifier.value,
@@ -175,8 +184,12 @@ onBeforeUnmount(() => {
 });
 
 async function submitRegister() {
-  if (!String(staffReason.value || '').trim()) {
+  if (signupRole.value === 'client' && !String(staffReason.value || '').trim()) {
     throw new Error('Please provide your reason for becoming a staff.');
+  }
+
+  if (signupRole.value === 'admin' && !adminSignupCode.value) {
+    throw new Error('Enter the one-time admin signup invite code.');
   }
 
   if (!passwordIsStrong(password.value)) {
@@ -192,9 +205,12 @@ async function submitRegister() {
     email: contactMethod.value === 'email' ? email.value : undefined,
     phone: contactMethod.value === 'phone' ? phone.value : undefined,
     password: password.value,
-    staffReason: staffReason.value,
+    role: signupRole.value,
+    adminSignupCode: signupRole.value === 'admin' ? adminSignupCode.value : undefined,
+    staffReason: signupRole.value === 'client' ? staffReason.value : undefined,
   });
 
+  adminSignupCode.value = '';
   verifyContact.value = result.contact || (contactMethod.value === 'phone' ? phone.value : email.value);
   verifyChannel.value = result.channel || contactMethod.value;
   verifyOtp.value = '';
@@ -372,7 +388,17 @@ async function submitForm() {
             <span>Full Name</span>
             <input v-model="fullName" type="text" placeholder="Juan Dela Cruz" required />
           </label>
-          <div class="tabs contact-method" aria-label="Signup contact method">
+          <label>
+            <span>Account role</span>
+            <select
+              v-model="signupRole"
+              @change="handleSignupRoleChange"
+            >
+              <option value="client">Client</option>
+              <option value="admin">Admin (one-time invite required)</option>
+            </select>
+          </label>
+          <div v-if="signupRole !== 'admin'" class="tabs contact-method" aria-label="Signup contact method">
             <button type="button" :class="{ active: contactMethod === 'email' }" @click="contactMethod = 'email'">Use Email</button>
             <button type="button" :class="{ active: contactMethod === 'phone' }" @click="contactMethod = 'phone'">Use Phone</button>
           </div>
@@ -391,6 +417,16 @@ async function submitForm() {
               required
             />
             <small>Use international format, for example +639171234567.</small>
+          </label>
+          <label v-if="signupRole === 'admin'">
+            <span>One-time admin invite code</span>
+            <input
+              v-model="adminSignupCode"
+              type="password"
+              autocomplete="off"
+              placeholder="Enter the code from your system administrator"
+              required
+            />
           </label>
           <label>
             <span>Password</span>
@@ -484,7 +520,7 @@ async function submitForm() {
               </button>
             </div>
           </label>
-          <label>
+          <label v-if="signupRole === 'client'">
             <span>Why do you want to become a staff?</span>
             <textarea
               v-model="staffReason"
@@ -788,7 +824,8 @@ label span {
 }
 
 input,
-textarea {
+textarea,
+select {
   border: 1px solid rgba(109, 218, 181, 0.35);
   border-radius: 10px;
   background: rgba(7, 25, 33, 0.88);
