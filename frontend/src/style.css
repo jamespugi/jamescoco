@@ -23,7 +23,24 @@ body,
   min-height: 100%;
 }
 
+html {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 body {
+  /* Ionic defaults to a fixed, clipped body; these routes scroll as a normal document. */
+  position: static;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  max-height: none;
+  overflow: visible;
+  touch-action: auto;
+  overscroll-behavior-y: auto;
+  transform: none;
   background:
     radial-gradient(70% 45% at 5% 0%, rgba(40, 144, 118, 0.24), transparent 85%),
     radial-gradient(85% 60% at 95% 100%, rgba(238, 146, 58, 0.22), transparent 82%),
@@ -31,5 +48,37 @@ body {
 }
 
 ion-app {
+  /* Override Ionic's viewport-sized root so route content contributes to document height. */
+  position: relative !important;
+  display: block;
+  width: 100%;
+  min-height: 100vh !important;
+  min-height: 100dvh !important;
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+  contain: none !important;
   background: transparent;
+}
+
+html:has(.modal-backdrop),
+html:has(.modal-wrap),
+html:has(.overlay) {
+  overflow: hidden;
+}
+
+ion-app .modal-backdrop > .modal-card,
+ion-app .modal-wrap > .modal-card {
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.table-wrap {
+  min-width: 0;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
 }

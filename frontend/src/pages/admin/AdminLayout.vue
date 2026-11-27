@@ -331,7 +331,6 @@ onUnmounted(() => {
   background: #081923;
   color: #ecf7ff;
   position: relative;
-  overflow: hidden;
 }
 
 .content {

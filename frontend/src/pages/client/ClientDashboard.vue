@@ -337,7 +337,6 @@ onUnmounted(() => {
   min-height: 100vh;
   background: #071c24;
   position: relative;
-  overflow: hidden;
 }
 
 .client-page {

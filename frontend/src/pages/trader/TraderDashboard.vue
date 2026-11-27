@@ -452,11 +452,11 @@ onUnmounted(() => {
   min-height: 100vh;
   background: #071a22;
   position: relative;
-  overflow: hidden;
 }
 
 .trader-layout.call-active-layout {
   height: 100dvh;
+  overflow: hidden;
 }
 
 .trader-page {
